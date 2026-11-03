@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+dist/
+src-tauri/target/
+
+# 构建产物
+*.msi
+*.exe
+
+# 日志
+*.log
+npm-debug.log*
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地环境
+.env
+.env.local

@@ -1,0 +1,63 @@
+[package]
+name = "lshell"
+version = "1.0.0"
+description = "Lshell - 轻量级 Windows SSH 客户端"
+edition = "2021"
+rust-version = "1.85"
+
+[lib]
+name = "lshell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SSH 协议栈：必须锁定精确版本，russh API 不稳定，升级需走独立分支做回归
+#
+# 加密后端选择 ring 而非默认的 aws-lc-rs：
+# aws-lc-sys 在 Windows 上编译需要 NASM 汇编器，会给每个构建者增加一个
+# 额外工具链依赖。ring 在 Windows 上使用预生成的汇编，无需 NASM。
+# 对个人 SSH 客户端而言，ring 的性能与安全特性完全够用。
+russh = { version = "=0.65.0", default-features = false, features = [
+  "flate2",
+  "ring",
+  "rsa",
+] }
+russh-sftp = "=3.0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "fs"] }
+bytes = "1"
+futures = "0.3"
+
+# 本地存储
+rusqlite = { version = "0.41", features = ["bundled"] }
+directories = "6"
+
+# 加密
+#
+# 主密钥由 Windows DPAPI 保管（见 src/dpapi.rs，直接声明 Win32 FFI，
+# 不引入 windows crate 以避免上万个 API 绑定的编译开销）。
+aes-gcm = { version = "0.11", features = ["getrandom"] }
+rand = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+
+thiserror = "2"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

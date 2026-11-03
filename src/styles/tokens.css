@@ -1,0 +1,197 @@
+/* ============================================================
+   Lshell 设计 Token —— 「深空靛紫」
+   ------------------------------------------------------------
+   单一事实来源：所有组件样式只引用这里的变量。
+   改这里即可全局换肤，不需要改动任何组件代码。
+
+   主题切换：html[data-theme="light"] 覆写同一批变量。
+   ============================================================ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---------- 表面层次 Surfaces ---------- */
+  --bg-app:      #0B0D11;   /* 终端画布、窗体底色 */
+  --bg-panel:    #101319;   /* 侧栏、标签栏、状态栏 */
+  --bg-surface:  #161A21;   /* 输入框、列表行 */
+  --bg-raised:   #1D222B;   /* 对话框、悬浮提示 */
+  --bg-hover:    #1F2530;   /* 悬停 */
+  --bg-active:   #262D38;   /* 按下 */
+  --bg-sunken:   #08090C;   /* 凹陷区 */
+
+  /* ---------- 描边 Lines ---------- */
+  --line-faint:  #1A1F27;   /* 分隔线（最弱） */
+  --line:        #262C37;   /* 常规描边 */
+  --line-strong: #343C4A;   /* 强调描边 */
+
+  /* ---------- 前景 Foreground ---------- */
+  --fg:          #E6E9F0;   /* 主文字 */
+  --fg-muted:    #98A1B2;   /* 次文字 */
+  --fg-faint:    #626B7C;   /* 弱文字、占位符 */
+  --fg-on-accent:#0B0D11;   /* 主色上的文字 */
+
+  /* ---------- 主色 Accent（靛紫） ---------- */
+  --accent:        #7C8CFF;
+  --accent-hover:  #97A4FF;
+  --accent-press:  #6273F5;
+  --accent-dim:    rgba(124, 140, 255, .14);
+  --accent-line:   rgba(124, 140, 255, .34);
+  --accent-glow:   rgba(124, 140, 255, .42);
+
+  /* ---------- 语义色 Semantic ---------- */
+  --ok:        #35D6A4;
+  --ok-dim:    rgba(53, 214, 164, .14);
+  --warn:      #F0B429;
+  --warn-dim:  rgba(240, 180, 41, .14);
+  --err:       #F2555A;
+  --err-dim:   rgba(242, 85, 90, .14);
+  --info:      #46B8E0;
+  --info-dim:  rgba(70, 184, 224, .14);
+
+  /* ---------- 终端 ANSI 16 色 ---------- */
+  --term-bg:     #0B0D11;
+  --term-fg:     #C9D1DE;
+  --term-cursor: #7C8CFF;
+  --term-sel:    rgba(124, 140, 255, .28);
+
+  --term-black:         #262C37;
+  --term-red:           #FF7B72;
+  --term-green:         #7EE787;
+  --term-yellow:        #F2CC60;
+  --term-blue:          #79B8FF;
+  --term-magenta:       #D2A8FF;
+  --term-cyan:          #56D4DD;
+  --term-white:         #C9D1DE;
+
+  --term-bright-black:  #626B7C;
+  --term-bright-red:    #FF9B94;
+  --term-bright-green:  #9BF0A0;
+  --term-bright-yellow: #FFD98A;
+  --term-bright-blue:   #A5CBFF;
+  --term-bright-magenta:#E2C4FF;
+  --term-bright-cyan:   #86E6EC;
+  --term-bright-white:  #E6E9F0;
+
+  /* ---------- 排版 Typography ---------- */
+  --font-ui: "Segoe UI Variable Text", -apple-system, "Segoe UI",
+             "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+             "Hiragino Sans GB", sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", "JetBrains Mono",
+               ui-monospace, Consolas, "Courier New", monospace;
+
+  --fs-body:    13px;
+  --fs-list:    12.5px;
+  --fs-aux:     11.5px;
+  --fs-label:   10.5px;   /* 分组标题，字重 700 + 字距 .12em */
+  --fs-mono:    12px;
+
+  /* ---------- 圆角 Radius ---------- */
+  --r-sm:  6px;
+  --r-md:  9px;
+  --r-lg:  14px;
+  --r-xl:  18px;
+
+  /* ---------- 间距 Spacing（基数 4） ---------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+
+  /* ---------- 尺寸 Sizes ---------- */
+  --h-titlebar: 40px;
+  --h-topbar:   56px;
+  --h-statusbar: 30px;
+  --h-tabbar:   40px;
+  --w-sidebar:  248px;
+  --w-sftp:     288px;
+
+  /* ---------- 阴影 Shadow ---------- */
+  --shadow-panel: 0 1px 0 rgba(255,255,255,.03) inset,
+                  0 18px 48px -24px rgba(0,0,0,.9);
+  --shadow-pop:   0 12px 40px -12px rgba(0,0,0,.75),
+                  0 0 0 1px var(--line);
+  --shadow-accent: 0 4px 14px -6px var(--accent-glow);
+
+  /* ---------- 动效 Motion ---------- */
+  --ease: cubic-bezier(.4, 0, .2, 1);
+  --dur:  150ms;
+
+  /* ---------- 滚动条 Scrollbar ---------- */
+  --scroll-thumb: #262C37;
+  --scroll-thumb-hover: #343C4A;
+}
+
+/* ============================================================
+   浅色主题：同一批 token 的覆写
+   ============================================================ */
+
+html[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-app:      #FBFCFE;
+  --bg-panel:    #F4F6FA;
+  --bg-surface:  #FFFFFF;
+  --bg-raised:   #FFFFFF;
+  --bg-hover:    #EDF0F6;
+  --bg-active:   #E3E8F0;
+  --bg-sunken:   #F7F9FC;
+
+  --line-faint:  #E9ECF2;
+  --line:        #DCE1EA;
+  --line-strong: #C3CBD8;
+
+  --fg:          #121722;
+  --fg-muted:    #59616F;
+  --fg-faint:    #8B93A1;
+  --fg-on-accent:#FFFFFF;
+
+  --accent:        #4F5BE8;
+  --accent-hover:  #3E49D4;
+  --accent-press:  #3641C4;
+  --accent-dim:    rgba(79, 91, 232, .10);
+  --accent-line:   rgba(79, 91, 232, .30);
+  --accent-glow:   rgba(79, 91, 232, .38);
+
+  --ok:        #0E9F6E;
+  --ok-dim:    rgba(14, 159, 110, .12);
+  --warn:      #B7791F;
+  --warn-dim:  rgba(183, 121, 31, .12);
+  --err:       #D93A3F;
+  --err-dim:   rgba(217, 58, 63, .12);
+  --info:      #0F7FA8;
+  --info-dim:  rgba(15, 127, 168, .12);
+
+  --term-bg:     #FBFCFE;
+  --term-fg:     #2B3240;
+  --term-cursor: #4F5BE8;
+  --term-sel:    rgba(79, 91, 232, .20);
+
+  --term-black:         #121722;
+  --term-red:           #C0392F;
+  --term-green:         #16825A;
+  --term-yellow:        #9A6512;
+  --term-blue:          #2563C9;
+  --term-magenta:       #6D3FC4;
+  --term-cyan:          #0E7C8A;
+  --term-white:         #2B3240;
+
+  --term-bright-black:  #59616F;
+  --term-bright-red:    #D93A3F;
+  --term-bright-green:  #0E9F6E;
+  --term-bright-yellow: #B7791F;
+  --term-bright-blue:   #2563C9;
+  --term-bright-magenta:#7C4FD4;
+  --term-bright-cyan:   #0F7FA8;
+  --term-bright-white:  #121722;
+
+  --shadow-panel: 0 1px 2px rgba(16,24,40,.06),
+                  0 18px 48px -24px rgba(16,24,40,.35);
+  --shadow-pop:   0 12px 40px -12px rgba(16,24,40,.28),
+                  0 0 0 1px var(--line);
+  --shadow-accent: 0 4px 14px -6px var(--accent-glow);
+
+  --scroll-thumb: #D5DBE5;
+  --scroll-thumb-hover: #BCC5D3;
+}
