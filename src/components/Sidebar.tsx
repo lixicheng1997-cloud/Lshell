@@ -139,9 +139,8 @@ export default function Sidebar({
     <div
       key={host.id}
       className={`host-row ${selectedId === host.id ? "active" : ""}`}
-      onClick={() => onSelect(host.id)}
-      onDoubleClick={() => onEditHost(host)}
-      title={`${host.username}@${host.address}:${host.port} · 双击编辑`}
+      onDoubleClick={() => onSelect(host.id)}
+      title={`${host.username}@${host.address}:${host.port} · 双击连接`}
     >
       <span
         className="sdot"

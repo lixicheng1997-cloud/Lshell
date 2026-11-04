@@ -62,6 +62,61 @@ interface TabState {
 let seq = 0;
 const nextId = () => `tab-${++seq}-${Date.now()}`;
 
+// ---------- 会话恢复 ----------
+
+/** 打开的标签持久化到 localStorage，刷新/重启后恢复并自动重连 */
+const STORAGE_KEY = "lshell.open_tabs";
+
+interface PersistedTab {
+  hostId: number;
+  alias: string;
+  address: string;
+  port: number;
+}
+
+function persistTabs(state: TabState) {
+  try {
+    const activeIndex = state.tabs.findIndex((t) => t.id === state.activeId);
+    const data = {
+      activeIndex,
+      tabs: state.tabs.map<PersistedTab>((t) => ({
+        hostId: t.hostId,
+        alias: t.alias,
+        address: t.address,
+        port: t.port,
+      })),
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch {
+    // 存储不可用时静默放弃，只损失「刷新恢复」能力
+  }
+}
+
+/** 读回上次的标签；id 全部重新生成（旧会话已不存在），状态回到连接中 */
+function loadPersistedTabs(): { tabs: Tab[]; activeId: string | null } {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { tabs: [], activeId: null };
+    const data = JSON.parse(raw) as {
+      activeIndex: number;
+      tabs: PersistedTab[];
+    };
+    const tabs = (data.tabs ?? []).map<Tab>((t) => ({
+      id: nextId(),
+      hostId: t.hostId,
+      alias: t.alias,
+      address: t.address,
+      port: t.port,
+      status: "connecting",
+    }));
+    const activeId =
+      tabs[data.activeIndex]?.id ?? tabs[tabs.length - 1]?.id ?? null;
+    return { tabs, activeId };
+  } catch {
+    return { tabs: [], activeId: null };
+  }
+}
+
 /**
  * 状态点样式类。
  *
@@ -99,8 +154,7 @@ export function statusText(status: TabStatus): string {
 }
 
 export const useTabs = create<TabState>((set) => ({
-  tabs: [],
-  activeId: null,
+  ...loadPersistedTabs(),
   trustPrompt: null,
 
   openTab: (host) =>
@@ -174,10 +228,18 @@ export const useTabs = create<TabState>((set) => ({
   clearTrustPrompt: () => set({ trustPrompt: null }),
 
   reconnect: (tabId) =>
-    set((state) => ({
+    set((state) => {
       // 换 id 让 React 重新挂载 TerminalView，触发重连
-      tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, id: nextId(), status: "connecting" } : t
-      ),
-    })),
+      const newId = nextId();
+      return {
+        tabs: state.tabs.map((t) =>
+          t.id === tabId ? { ...t, id: newId, status: "connecting" } : t
+        ),
+        // 重连的就是当前标签时，跟随新 id，保持该终端仍处于选中状态
+        activeId: state.activeId === tabId ? newId : state.activeId,
+      };
+    }),
 }));
+
+// 任何标签变动都落一次 localStorage，供下次刷新/启动时恢复
+useTabs.subscribe(persistTabs);

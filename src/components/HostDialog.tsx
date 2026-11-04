@@ -93,12 +93,15 @@ export default function HostDialog({
 
     setBusy(true);
     try {
-      // 先把新建标签落库，拿到 id 后再关联主机
-      const created: Tag[] = [];
+      // 新建标签先落库拿到真实 id：form.tagIds 里存的是占位负数 id，
+      // 必须就地替换，否则会把占位 id 当作外键写进 host_tags
+      const idByTemp = new Map<number, number>();
       for (const t of newTags) {
-        created.push(await api.upsertTag(t.name, t.color));
+        if (!form.tagIds.includes(t.id)) continue; // 建完又取消选中的不落库
+        const saved = await api.upsertTag(t.name, t.color);
+        idByTemp.set(t.id, saved.id);
       }
-      const tagIds = [...form.tagIds, ...created.map((t) => t.id)];
+      const tagIds = form.tagIds.map((id) => idByTemp.get(id) ?? id);
       const id = await api.saveHost({ ...form, tagIds }, host?.id);
       onSaved(id, form.alias.trim());
     } catch (e) {
