@@ -30,6 +30,8 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "xichengli",
+    "copyright": "Copyright © 2026 xichengli",
     "targets": [
       "msi",
       "nsis"

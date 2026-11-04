@@ -1,7 +1,15 @@
 /** Rust 命令的 TypeScript 封装 */
 import { invoke } from "@tauri-apps/api/core";
 import { Channel } from "@tauri-apps/api/core";
-import type { Forward, Group, Host, HostInput, KnownHost, Tag } from "./types";
+import type {
+  AppInfo,
+  Forward,
+  Group,
+  Host,
+  HostInput,
+  KnownHost,
+  Tag,
+} from "./types";
 
 /** 终端通道帧类型（对应 Rust 侧 session::FRAME_*） */
 export const FRAME_DATA = 0x00;
@@ -53,6 +61,10 @@ export type ConnectOutcome =
   | { status: "needsHostKeyTrust"; fingerprint: string; algo: string };
 
 export const api = {
+  // 应用
+  /** 应用元信息：名称、版本、作者、简介 */
+  appInfo: () => invoke<AppInfo>("app_info"),
+
   // 主机
   listHosts: (search?: string) => invoke<Host[]>("list_hosts", { search: search ?? null }),
   getHost: (id: number) => invoke<Host | null>("get_host", { id }),

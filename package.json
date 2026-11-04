@@ -2,10 +2,12 @@
   "name": "lshell",
   "private": true,
   "version": "1.0.0",
+  "author": "xichengli",
   "type": "module",
   "scripts": {
     "assets": "node scripts/gen_assets.mjs",
     "assets:verify": "node scripts/verify_icons.mjs",
+    "author:verify": "node scripts/verify_author.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",

@@ -2,6 +2,16 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 应用元信息（关于对话框与标题栏版本号展示）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Host {

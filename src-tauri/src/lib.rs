@@ -44,6 +44,7 @@ pub fn run() {
         .manage(sessions)
         .invoke_handler(tauri::generate_handler![
             commands::app_data_dir,
+            commands::app_info,
             commands::list_hosts,
             commands::get_host,
             commands::save_host,

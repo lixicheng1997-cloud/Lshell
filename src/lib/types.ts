@@ -1,5 +1,13 @@
 /** 与 Rust 侧共享的数据类型（对应 src-tauri/src/models.rs） */
 
+/** 应用元信息（对应 Rust 侧 models::AppInfo） */
+export interface AppInfo {
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+}
+
 export interface Tag {
   id: number;
   name: string;

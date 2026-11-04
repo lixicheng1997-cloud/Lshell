@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "./lib/api";
-import type { Group, Host, Tag } from "./lib/types";
+import type { AppInfo, Group, Host, Tag } from "./lib/types";
 import { useTabs, statusDotClass } from "./lib/tabs";
 import { useShortcuts, type Shortcut } from "./lib/shortcuts";
 import { initTheme, setTheme, type ThemeMode } from "./lib/theme";
@@ -27,6 +27,7 @@ import HostKeyDialog from "./components/HostKeyDialog";
 import SftpPanel from "./components/SftpPanel";
 import ForwardPanel from "./components/ForwardPanel";
 import ShortcutHelp from "./components/ShortcutHelp";
+import AboutDialog from "./components/AboutDialog";
 import CommandHistoryPanel from "./components/CommandHistoryPanel";
 import Resizer from "./components/Resizer";
 import Icon from "./components/Icon";
@@ -49,9 +50,23 @@ export default function App() {
   const [showForward, setShowForward] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [sftpCollapsed, setSftpCollapsed] = useState(true);
   const [theme, setThemeMode] = useState<ThemeMode>("dark");
   const [maximized, setMaximized] = useState(false);
+
+  /**
+   * 应用元信息（版本、作者）。
+   *
+   * 兜底值与 Rust 侧一致：浏览器预览环境没有 app_info 命令，
+   * 此时不能让标题栏空着。
+   */
+  const [appInfo, setAppInfo] = useState<AppInfo>({
+    name: "lshell",
+    version: "1.0.0",
+    author: "xichengli",
+    description: "Lshell - 轻量级 Windows SSH 客户端",
+  });
 
   // 栏宽可拖拽调整，并持久化
   const [sidebarWidth, setSidebarWidthRaw, persistSidebarWidth] =
@@ -145,6 +160,11 @@ export default function App() {
       setThemeMode(mode);
       // 目录跟踪开关同样在首屏前读出
       setFollowCwd(await readBool(LAYOUT_KEYS.followCwd, true));
+      // 版本号与作者：读不出来时保留兜底值，不阻断启动
+      api
+        .appInfo()
+        .then(setAppInfo)
+        .catch(() => {});
       setBooting(false);
     })();
   }, [refresh]);
@@ -185,6 +205,20 @@ export default function App() {
       prev[tabId] === path ? prev : { ...prev, [tabId]: path }
     );
   }, []);
+
+  /**
+   * 切换文件面板。
+   *
+   * 没有任何远程连接时不允许打开：右侧文件面板依赖一个已建立的 SSH 会话，
+   * 空会话下展开只会得到一串请求错误。
+   */
+  const toggleSftp = useCallback(() => {
+    if (!activeTab) {
+      notify.info("请先在左侧选择主机并连接，再打开文件面板");
+      return;
+    }
+    setSftpCollapsed((c) => !c);
+  }, [activeTab]);
 
   /** 开关「SFTP 跟随终端目录」 */
   const handleFollowChange = useCallback(
@@ -266,7 +300,7 @@ export default function App() {
       {
         combo: "mod+shift+f",
         description: "切换文件面板",
-        handler: () => setSftpCollapsed((c) => !c),
+        handler: toggleSftp,
       },
       {
         combo: "mod+shift+t",
@@ -335,6 +369,7 @@ export default function App() {
     <div className="app">
       <TitleBar
         maximized={maximized}
+        version={appInfo.version}
         onMinimize={() => windowCtl("minimize")}
         onToggleMaximize={() => windowCtl("toggle")}
         onClose={() => windowCtl("close")}
@@ -348,6 +383,7 @@ export default function App() {
         onForward={() => setShowForward(true)}
         onShortcuts={() => setShowShortcuts(true)}
         onHistory={() => setShowHistory(true)}
+        onAbout={() => setShowAbout(true)}
       />
 
       <div className="body" style={{ gridTemplateColumns: bodyColumns }}>
@@ -514,12 +550,13 @@ export default function App() {
         <SftpPanel
           sessionId={activeTab?.id ?? ""}
           collapsed={sftpCollapsed}
-          onToggle={() => setSftpCollapsed((c) => !c)}
+          onToggle={toggleSftp}
           cwd={activeTab ? (cwdMap[activeTab.id] ?? null) : null}
           follow={followCwd}
           onFollowChange={handleFollowChange}
           onError={notify.error}
           jumpTo={sftpJump}
+          status={activeTab?.status ?? null}
         />
       </div>
 
@@ -583,6 +620,10 @@ export default function App() {
           shortcuts={shortcuts}
           onClose={() => setShowShortcuts(false)}
         />
+      )}
+
+      {showAbout && (
+        <AboutDialog info={appInfo} onClose={() => setShowAbout(false)} />
       )}
 
       {showHistory && (

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage, type TransferStatus } from "../lib/api";
+import type { TabStatus } from "../lib/tabs";
 import { notify } from "../lib/toast";
 import Icon from "./Icon";
 import ConfirmDialog from "./ConfirmDialog";
@@ -32,6 +33,13 @@ interface Props {
   follow: boolean;
   onFollowChange: (next: boolean) => void;
   onError: (msg: string) => void;
+  /**
+   * 当前会话的连接状态；null 表示没有选中任何远程连接。
+   *
+   * 只有 status === "connected" 才允许浏览和操作远端文件，
+   * 连接中 / 失败 / 断开时面板只展示提示，不发任何 SFTP 请求。
+   */
+  status: TabStatus | null;
   /**
    * 外部跳转请求。
    *
@@ -125,7 +133,10 @@ export default function SftpPanel({
   onFollowChange,
   onError,
   jumpTo,
+  status,
 }: Props) {
+  /** 只有已连接的会话才能浏览 / 操作远端文件 */
+  const connected = status === "connected";
   const [path, setPath] = useState(".");
   const [entries, setEntries] = useState<RemoteEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -145,11 +156,16 @@ export default function SftpPanel({
   /** 当前目录的 ref：轮询回调里要用，避免闭包拿到旧值 */
   const pathRef = useRef(path);
   pathRef.current = path;
+  /** 连接状态的 ref：load / 轮询回调里用它拦截未连接时的请求 */
+  const connectedRef = useRef(connected);
+  connectedRef.current = connected;
   /** 已经提示过完成的传输，避免重复刷新目录 */
   const doneRef = useRef<Set<number>>(new Set());
 
   const load = useCallback(
     async (target: string) => {
+      // 未连接时不出请求：连接失败也不会在面板上炸一串错误
+      if (!connectedRef.current) return;
       setLoading(true);
       try {
         const listing = await api.sftpList(sessionId, target);
@@ -175,18 +191,20 @@ export default function SftpPanel({
     [load]
   );
 
-  // 会话切换或面板展开时重新加载
+  // 会话切换、面板展开或连接就绪时（重新）加载目录。
+  // 连接中打开面板不会请求；等到 status 变为 connected 再触发，
+  // 这样新连接一就绪文件列表就立刻出现。
   useEffect(() => {
-    if (collapsed) return;
+    if (collapsed || !connected) return;
     setManual(false);
     const target = follow && cwd ? cwd : ".";
     void load(target);
-    // 面板展开或会话变化时刷新
-  }, [collapsed, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+    // 面板展开、会话变化或连接就绪时刷新
+  }, [collapsed, sessionId, connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 终端目录变化时跟随
   useEffect(() => {
-    if (!follow || !cwd) return;
+    if (!follow || !cwd || !connected) return;
     if (cwd === path) return;
     setManual(false);
     void load(cwd);
@@ -194,7 +212,7 @@ export default function SftpPanel({
 
   // 外部跳转请求：面板直接去到指定路径
   useEffect(() => {
-    if (!jumpTo || collapsed) return;
+    if (!jumpTo || collapsed || !connected) return;
     setManual(true);
     void load(jumpTo.path);
     // 只在 nonce 变化时触发
@@ -409,6 +427,36 @@ export default function SftpPanel({
           <Icon name="folder" size={15} />
           {running > 0 && <span className="sftp-badge">{running}</span>}
         </button>
+      </div>
+    );
+  }
+
+  // 未选择会话或会话未成功连接：只展示提示，不出文件列表和操作按钮
+  if (!connected) {
+    const hint = !sessionId
+      ? { title: "未选择远程连接", desc: "请先在左侧选择主机并建立连接" }
+      : status === "connecting" || status === "reconnecting"
+        ? { title: "正在连接…", desc: "连接成功后即可浏览远端文件" }
+        : status === "failed"
+          ? { title: "连接失败", desc: "重新连接成功后才能操作远端文件" }
+          : { title: "连接已断开", desc: "重新连接成功后才能操作远端文件" };
+    return (
+      <div ref={panelRef} className="sftp-panel">
+        <div className="sftp-head">
+          <span className="title">远端文件</span>
+          <button
+            className="icon-btn"
+            onClick={onToggle}
+            title="关闭面板 (Ctrl+Shift+F)"
+          >
+            <Icon name="close" />
+          </button>
+        </div>
+        <div className="sftp-offline">
+          <Icon name="folder" size={26} />
+          <span className="t">{hint.title}</span>
+          <span className="d">{hint.desc}</span>
+        </div>
       </div>
     );
   }
