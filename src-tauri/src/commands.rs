@@ -12,7 +12,7 @@ use tauri::State;
 use crate::db::now_secs;
 use crate::error::{AppError, Result};
 use crate::transfer;
-use crate::models::{self, Forward, Group, Host, HostInput, HostQuery, KnownHost, Tag};
+use crate::models::{self, AppInfo, Forward, Group, Host, HostInput, HostQuery, KnownHost, Tag};
 use crate::session;
 use crate::ssh;
 use crate::state::{self, AppState};
@@ -23,6 +23,27 @@ use crate::vault;
 #[tauri::command]
 pub fn app_data_dir() -> Result<String> {
     Ok(crate::data_dir().to_string_lossy().into_owned())
+}
+
+/// 应用元信息：名称、版本、作者、简介
+///
+/// 取值全部来自 Cargo.toml 的编译期环境变量，
+/// 与打包元数据（tauri.conf.json 的 bundle.publisher / copyright）同源，
+/// 不会出现「界面写一个版本号、安装包写另一个」的漂移。
+#[tauri::command]
+pub fn app_info() -> AppInfo {
+    AppInfo {
+        name: env!("CARGO_PKG_NAME").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        // Cargo.toml 里 authors 是数组，这里取第一个作为展示作者
+        author: env!("CARGO_PKG_AUTHORS")
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        description: env!("CARGO_PKG_DESCRIPTION").to_string(),
+    }
 }
 
 // ---------- 主机 ----------
@@ -216,7 +237,13 @@ pub fn trust_host_key(
     algo: String,
     fingerprint: String,
 ) -> Result<()> {
-    Ok(state.db()?.insert_known_host(&host, port, &algo, &fingerprint)?)
+    // known_hosts 是按 (host, port) 精确匹配的，记录侧必须走和连接侧同一套
+    // 归一规则 —— 否则地址写成 `10.0.0.5:2222` 这类形态时，指纹存的是整串、
+    // 查的是拆开后的主机名，确认框每次连接都会重弹。
+    let port = u16::try_from(port)
+        .map_err(|_| AppError::Invalid(format!("端口 {port} 超出 1–65535")))?;
+    let (host, port) = ssh::normalize_address(&host, port)?;
+    Ok(state.db()?.insert_known_host(&host, port as i64, &algo, &fingerprint)?)
 }
 
 // ---------- 设置 ----------

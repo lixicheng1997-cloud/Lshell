@@ -2,6 +2,8 @@
 
 轻量级 Windows SSH 客户端。主打主机管理、多标签终端、SFTP 文件传输与端口转发。
 
+作者：**xichengli**
+
 设计文档见 [`docs/product-design.md`](docs/product-design.md)。
 品牌标识见 [`design/logo.html`](design/logo.html)。
 
@@ -33,6 +35,7 @@ npm run tauri build  # 打包 Windows 安装包（MSI + NSIS）
 npm run build        # 仅构建前端
 npm run assets       # 重新生成品牌资产（字标 + 应用图标）
 npm run assets:verify # 校验已构建的 exe 内嵌图标是否为当前版本
+npm run author:verify # 校验安装包与 exe 里的作者元数据
 
 cd src-tauri && cargo test    # Rust 单元测试
 ```
@@ -68,16 +71,32 @@ scripts/make_icons.py  → src-tauri/icons/*.png + icon.ico
 
 | 文件 | 大小 | 安装范围 | 备注 |
 |---|---|---|---|
-| `nsis/Lshell_0.1.0_x64-setup.exe` | 2.6 MB | **当前用户**，无需管理员 | 推荐 |
-| `msi/Lshell_0.1.0_x64_en-US.msi` | 3.5 MB | 全机，需管理员 | 企业批量部署用 |
+| `nsis/Lshell_1.0.0_x64-setup.exe` | 2.6 MB | **当前用户**，无需管理员 | 推荐 |
+| `msi/Lshell_1.0.0_x64_en-US.msi` | 3.5 MB | 全机，需管理员 | 企业批量部署用 |
 
 NSIS 安装到 `%LOCALAPPDATA%\Lshell\`，应用数据在 `%APPDATA%\Lshell\data\`。
 
 **从 Git Bash 静默安装 NSIS 时注意**：`/S` 会被 MSYS 路径转换吃掉，必须用 PowerShell：
 
 ```powershell
-Start-Process -FilePath ".\Lshell_0.1.0_x64-setup.exe" -ArgumentList "/S" -Wait
+Start-Process -FilePath ".\Lshell_1.0.0_x64-setup.exe" -ArgumentList "/S" -Wait
 ```
+
+### 作者元数据
+
+「作者」在安装包与系统里的落点分两处，缺一不可：
+
+| 落点 | 来源 | 体现为 |
+|---|---|---|
+| `Cargo.toml` → `authors` | 编译期 `CARGO_PKG_AUTHORS` | Debian `Maintainer`；应用内「关于」面板 |
+| `tauri.conf.json` → `bundle.publisher` | 打包期 | MSI `Manufacturer`、NSIS `Publisher` 与注册表键、exe 版本资源 `CompanyName` |
+| `tauri.conf.json` → `bundle.copyright` | 打包期 | exe 版本资源 `LegalCopyright`、NSIS 安装向导底部版权行 |
+
+注意 `bundle.publisher` **不会**被 `Cargo.toml` 的 `authors` 覆盖 ——
+Cargo 的 `authors` 在 Windows 打包链路上只喂 Debian，反之亦然，两处都要写。
+
+应用内展示的版本号与作者来自 Rust 的 `app_info` 命令，
+它读的是 Cargo.toml 的编译期环境变量，因此与安装包里的元数据同源，不会各写一份。
 
 ### Windows 开发环境
 

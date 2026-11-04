@@ -9,12 +9,13 @@ interface Props {
   onForward: () => void;
   onShortcuts: () => void;
   onHistory: () => void;
+  onAbout: () => void;
 }
 
 /**
  * 功能顶栏。
  *
- * 只承载「可操作的东西」：搜索、转发、历史、快捷键、主题。
+ * 只承载「可操作的东西」：搜索、转发、历史、快捷键、关于、主题。
  * 新建主机放在侧栏标题行，这里不再重复一个入口。
  */
 export default function TopBar({
@@ -25,6 +26,7 @@ export default function TopBar({
   onForward,
   onShortcuts,
   onHistory,
+  onAbout,
 }: Props) {
   const themeIcon =
     theme === "dark" ? "moon" : theme === "light" ? "sun" : "monitor";
@@ -58,6 +60,11 @@ export default function TopBar({
       <button className="btn" onClick={onShortcuts} title="快捷键">
         <Icon name="keyboard" />
         快捷键
+      </button>
+
+      <button className="btn" onClick={onAbout} title="关于 Lshell">
+        <Icon name="info" />
+        关于
       </button>
 
       <button

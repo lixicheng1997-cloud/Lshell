@@ -2,6 +2,7 @@
 name = "lshell"
 version = "1.0.0"
 description = "Lshell - 轻量级 Windows SSH 客户端"
+authors = ["xichengli"]
 edition = "2021"
 rust-version = "1.85"
 

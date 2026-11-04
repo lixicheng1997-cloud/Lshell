@@ -3,6 +3,8 @@ import Brand from "./Brand";
 interface Props {
   /** 窗口是否为最大化状态 */
   maximized: boolean;
+  /** 应用版本号，来自 app_info 命令 */
+  version: string;
   onMinimize: () => void;
   onToggleMaximize: () => void;
   onClose: () => void;
@@ -13,9 +15,13 @@ interface Props {
  *
  * 品牌与版本号在这里，与下方功能顶栏分离 —— 旧版把两者挤在同一行，
  * 是「网页感」的根源。
+ *
+ * 版本号取自 app_info（Rust 侧读 Cargo.toml），不写死，
+ * 免得发版时漏改一处。
  */
 export default function TitleBar({
   maximized,
+  version,
   onMinimize,
   onToggleMaximize,
   onClose,
@@ -25,7 +31,7 @@ export default function TitleBar({
     <div className="titlebar" data-tauri-drag-region="deep">
       <div className="brand">
         <Brand height={16} className="logo" />
-        <span className="ver">1.0.0</span>
+        <span className="ver">{version}</span>
       </div>
 
       <div className="spacer" />
