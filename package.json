@@ -7,6 +7,7 @@
   "scripts": {
     "assets": "node scripts/gen_assets.mjs",
     "assets:verify": "node scripts/verify_icons.mjs",
+    "assets:verify:release": "node scripts/verify_icons.mjs --release",
     "author:verify": "node scripts/verify_author.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

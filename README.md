@@ -167,8 +167,14 @@ scripts/make_icons.py  → src-tauri/icons/*.png + icon.ico
 
 构建前会自动重新生成（`tauri.conf.json` 的 `beforeBuildCommand`），
 `src-tauri/build.rs` 对图标声明了 `cargo:rerun-if-changed`，
-保证图标变更后 exe 内嵌资源一定重编。构建后可用 `npm run assets:verify`
-直接检查 exe 字节流里内嵌的 PNG 是否为当前版本。
+保证图标变更后 exe 内嵌资源一定重编。
+
+安装包（NSIS `setup.exe`）的图标不会自动沿用 exe 图标：Tauri 只在
+`bundle.windows.nsis.installerIcon` / `uninstallerIcon` 显式指定时才会用，
+否则退回 NSIS 自带的默认图标。这两项已指向 `icons/icon.ico`（与 exe 同一份）。
+
+构建后可用 `npm run assets:verify:release` 校验：它同时检查 exe 与
+`bundle/nsis/*-setup.exe` 字节流里内嵌的 PNG 是否为当前版本，任一不符即失败。
 
 生成器只在内容变化时才落盘，日常构建照旧走增量。
 
