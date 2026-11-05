@@ -237,13 +237,17 @@ pub fn trust_host_key(
     algo: String,
     fingerprint: String,
 ) -> Result<()> {
-    // known_hosts 是按 (host, port) 精确匹配的，记录侧必须走和连接侧同一套
-    // 归一规则 —— 否则地址写成 `10.0.0.5:2222` 这类形态时，指纹存的是整串、
-    // 查的是拆开后的主机名，确认框每次连接都会重弹。
-    let port = u16::try_from(port)
-        .map_err(|_| AppError::Invalid(format!("端口 {port} 超出 1–65535")))?;
-    let (host, port) = ssh::normalize_address(&host, port)?;
-    Ok(state.db()?.insert_known_host(&host, port as i64, &algo, &fingerprint)?)
+    // known_hosts 按 (host, port) 精确匹配，记录侧必须和连接侧走同一套归一规则：
+    // 否则地址写成 `100.70.05.56:22022` 这类形态时，指纹存的是整串、查的是拆开规整
+    // 后的值，确认框每次连接都会重弹。
+    let (host, port) = match u16::try_from(port) {
+        Ok(default) => {
+            let (host, port) = ssh::normalize_address(&host, default);
+            (host, port as i64)
+        }
+        Err(_) => (host, port),
+    };
+    Ok(state.db()?.insert_known_host(&host, port, &algo, &fingerprint)?)
 }
 
 // ---------- 设置 ----------

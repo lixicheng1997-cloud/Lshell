@@ -5,7 +5,6 @@
 //!
 //! 连接状态由 Rust 侧持有，前端仅作视图。
 
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use russh::client::{self, Handle};
@@ -169,146 +168,73 @@ pub enum ConnectResult {
 
 /// 把地址字段整理成 `(host, port)`。
 ///
-/// `root@10.0.0.5`、`10.0.0.5:2222`、`[::1]:22` 这些写法会被 `getaddrinfo`
-/// 当成一整个域名去查，只能得到「未知的主机」这种看不出原因的报错，
-/// 所以解析前先拆开。地址里写了端口时以它为准 —— 那是用户最近一次的意图，
-/// 比表单里没跟着改的端口字段更可信。
-pub(crate) fn normalize_address(raw: &str, default_port: u16) -> Result<(String, u16)> {
+/// 只处理两种会被系统解析器误读的写法：点分 IPv4 里的前导零、以及误填在地址里的
+/// 端口。认不出来的形态原样交回，交给系统解析器 —— 报错文案与改动前完全一致。
+pub(crate) fn normalize_address(raw: &str, default_port: u16) -> (String, u16) {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::Invalid("主机地址为空".into()));
+    let (body, inline) = split_inline_port(trimmed);
+    let body = body.trim();
+    if body.is_empty() {
+        return (trimmed.to_string(), default_port);
     }
-    if trimmed.contains('@') {
-        return Err(AppError::Invalid(format!(
-            "地址「{trimmed}」里不要带用户名，只填主机名，用户名写在那一栏"
-        )));
-    }
-
-    let (host, inline_port) = match trimmed.strip_prefix('[') {
-        // 带方括号的 IPv6：`[::1]` 或 `[::1]:2222`
-        Some(body) => {
-            let Some((ip, tail)) = body.split_once(']') else {
-                return Err(AppError::Invalid(format!(
-                    "IPv6 地址「{trimmed}」缺少右方括号"
-                )));
-            };
-            (ip, tail.strip_prefix(':'))
-        }
-        // 只有「恰好一个冒号 + 纯数字后缀」才当作 host:port，
-        // 否则裸 IPv6（`fe80::1`）会被从中间切碎
-        None => match trimmed.rsplit_once(':') {
-            Some((h, p))
-                if !h.contains(':')
-                    && !p.is_empty()
-                    && p.bytes().all(|b| b.is_ascii_digit()) =>
-            {
-                (h, Some(p))
-            }
-            _ => (trimmed, None),
-        },
-    };
-
-    let host = canonicalize_ipv4(host.trim())?;
-    if host.is_empty() {
-        return Err(AppError::Invalid(format!("地址「{raw}」里没有主机名")));
-    }
-    let port = match inline_port {
-        Some(p) => parse_port(p)?,
-        None => default_port,
-    };
-    Ok((host, port))
+    (canonicalize_ipv4(body), inline.unwrap_or(default_port))
 }
 
-/// 把点分 IPv4 规整成标准写法，并挡下非法的段。
+/// 从地址里拆出内嵌的端口：`10.0.0.5:2222`、`[::1]:2222` 认，裸 IPv6 不拆。
 ///
-/// `100.70.05.56` 这种零填充写法（内网/Tailscale 地址常为了对齐而补零）既过不了
-/// `Ipv4Addr::from_str`（Rust 严格禁止前导零），也过不了 Windows 的数字地址解析，
-/// 于是整串被当成域名送去 DNS，最后报「查不到这个名字」——而用户填的明明是 IP，
-/// 其他 SSH 客户端也能连。非这种形态的输入（域名、IPv6）原样交回给解析器。
+/// 地址写了端口时以它为准 —— 那是用户最近一次的意图，比没跟着改的端口字段更可信。
+fn split_inline_port(address: &str) -> (&str, Option<u16>) {
+    if let Some(inner) = address.strip_prefix('[') {
+        return match inner.split_once(']') {
+            Some((ip, tail)) => (ip, tail.strip_prefix(':').and_then(parse_inline_port)),
+            // 括号没闭合：原样交给解析器，别猜
+            None => (address, None),
+        };
+    }
+    match address.rsplit_once(':') {
+        // 只有「恰好一个冒号」才当作 host:port，否则 `fe80::1` 会被从中间切碎
+        Some((host, tail)) if !host.contains(':') => match parse_inline_port(tail) {
+            Some(port) => (host, Some(port)),
+            None => (address, None),
+        },
+        _ => (address, None),
+    }
+}
+
+fn parse_inline_port(tail: &str) -> Option<u16> {
+    tail.parse::<u16>().ok().filter(|port| *port > 0)
+}
+
+/// 点分 IPv4 的前导零按十进制剥掉：`100.70.05.56` → `100.70.5.56`。
 ///
-/// 只按十进制剥前导零，不模仿老式 `inet_aton` 的八进制解释（`010` 当 8）：
-/// 那种写法会让同一个地址在不同客户端连到不同机器。
-fn canonicalize_ipv4(host: &str) -> Result<String> {
+/// 内网/Tailscale 地址常为了对齐而补零，但这种写法既过不了 `Ipv4Addr::from_str`
+/// （Rust 严格禁止前导零），也过不了 Windows 的数字地址解析，于是整串被当成域名
+/// 送去 DNS，报出一句和真实原因无关的「未知的主机」——其他 SSH 客户端接受它，
+/// 所以只在 Lshell 里连不上。不模仿老式 `inet_aton` 的八进制解释（`010` 当 8）：
+/// 那会让同一个地址在不同客户端连到不同机器。
+///
+/// 不是合法四段（`100.70.05`、`100.70.05.256`）时原样返回，不做二次猜测。
+fn canonicalize_ipv4(host: &str) -> String {
     let dotted_digits =
         host.contains('.') && host.bytes().all(|b| b.is_ascii_digit() || b == b'.');
-    if host.is_empty() || !dotted_digits {
-        return Ok(host.to_string());
+    if !dotted_digits {
+        return host.to_string();
     }
-
     let parts: Vec<&str> = host.split('.').collect();
-    if parts.len() != 4 || parts.iter().any(|p| p.is_empty() || p.len() > 3) {
-        return Err(AppError::Invalid(format!(
-            "地址「{host}」不是合法的 IPv4：应为点分四段、每段 1–3 位数字（当前 {} 段）",
-            parts.len()
-        )));
+    if parts.len() != 4 || parts.iter().any(|part| part.len() > 3) {
+        return host.to_string();
     }
-
     let mut octets = Vec::with_capacity(4);
-    for (i, part) in parts.iter().enumerate() {
-        let value: u32 = part
-            .parse()
-            .map_err(|_| AppError::Invalid(format!("地址「{host}」的第 {} 段无效", i + 1)))?;
+    for part in parts {
+        let Ok(value) = part.parse::<u32>() else {
+            return host.to_string();
+        };
         if value > 255 {
-            return Err(AppError::Invalid(format!(
-                "地址「{host}」的第 {} 段「{part}」不在 0–255 内",
-                i + 1
-            )));
+            return host.to_string();
         }
         octets.push(value.to_string());
     }
-    Ok(octets.join("."))
-}
-
-fn parse_port(raw: &str) -> Result<u16> {
-    let port: u16 = raw
-        .parse()
-        .map_err(|_| AppError::Invalid(format!("端口「{raw}」无效，应为 1–65535")))?;
-    if port == 0 {
-        return Err(AppError::Invalid("端口不能为 0".into()));
-    }
-    Ok(port)
-}
-
-/// `getaddrinfo` 的返回码里属于「这个名字查不出来」的那些。
-///
-/// Windows 是 WSA 码（11001 HOST_NOT_FOUND、11002 TRY_AGAIN、
-/// 11003 NO_RECOVERY、11004 NO_DATA），类 Unix 是负的 EAI 码
-/// （-2 NONAME、-3 AGAIN、-4 FAIL）。这些码在 std 里都落在
-/// `ErrorKind::Uncategorized`（对应的细分 kind 还没稳定），
-/// 所以只能按原始码判定。
-fn is_name_lookup_failure(e: &std::io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(11001..=11004) | Some(-4..=-2))
-}
-
-/// 解析目标地址，并把「DNS 查不到」和「TCP 连不上」分成两种错误。
-///
-/// 直接把字符串主机交给 russh 的话，两者在用户眼里都是同一句
-/// 「未知的主机」，而对应的处理动作完全不同（改地址 vs 查网络/VPN）。
-/// 解析结果同时也交给 `client::connect`，省掉库里的第二次查询。
-async fn resolve_target(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
-    match tokio::net::lookup_host((host, port)).await {
-        Ok(addrs) => {
-            let addrs: Vec<SocketAddr> = addrs.collect();
-            if addrs.is_empty() {
-                return Err(AppError::Connection(dns_failure_message(host, port)));
-            }
-            Ok(addrs)
-        }
-        Err(e) if is_name_lookup_failure(&e) => {
-            Err(AppError::Connection(dns_failure_message(host, port)))
-        }
-        Err(e) => Err(AppError::Connection(format!(
-            "解析主机 {host}:{port} 失败 — {e}"
-        ))),
-    }
-}
-
-fn dns_failure_message(host: &str, port: u16) -> String {
-    format!(
-        "无法解析主机「{host}」（端口 {port}）：本机 DNS 查不到这个名字。\n\
-         如果这台机器只在 VPN/内网里可解析，请确认 VPN 已连接后重试；\n\
-         也可以把地址直接改成它的内网 IP。"
-    )
+    octets.join(".")
 }
 
 /// 主机密钥校验通过 `ClientHandler` 完成。
@@ -321,14 +247,10 @@ fn dns_failure_message(host: &str, port: u16) -> String {
 /// 写入 known_hosts 再重连。
 pub async fn connect(params: ConnectParams) -> Result<ConnectResult> {
     let timeout = params.connect_timeout();
-    // 超时提示必须带上目标地址：只说「连接超时」，用户无从判断卡在哪台机器、哪个端口
-    let target = format!("{}:{}", params.host, params.port);
     match tokio::time::timeout(timeout, connect_inner(params)).await {
         Ok(result) => result,
         Err(_) => Err(AppError::Connection(format!(
-            "连接 {target} 超时（{} 秒内未完成握手）。\n\
-             包发出去了但没有任何回应，通常是地址或端口不对，\n\
-             或中间防火墙把包静默丢了 —— 换成本机 ssh/其他客户端连同一个地址端口对比一下。",
+            "连接超时（{} 秒内未完成握手）",
             timeout.as_secs()
         ))),
     }
@@ -337,8 +259,7 @@ pub async fn connect(params: ConnectParams) -> Result<ConnectResult> {
 /// 实际建立连接（由 [`connect`] 负责加超时）
 async fn connect_inner(params: ConnectParams) -> Result<ConnectResult> {
     let (keepalive_interval, keepalive_max) = params.keepalive_settings();
-    let (host, port) = normalize_address(&params.host, params.port)?;
-    let target = resolve_target(&host, port).await?;
+    let (host, port) = normalize_address(&params.host, params.port);
 
     let config = client::Config {
         // 不用 inactivity_timeout：它的语义是「多久没收到任何数据就掐断连接」，
@@ -359,7 +280,12 @@ async fn connect_inner(params: ConnectParams) -> Result<ConnectResult> {
     let verdict = Arc::clone(&handler.verdict);
     let presented = Arc::clone(&handler.presented);
 
-    let handle = client::connect(Arc::new(config), target.as_slice(), handler).await;
+    let handle = client::connect(
+        Arc::new(config),
+        (host.as_str(), port),
+        handler,
+    )
+    .await;
 
     let mut handle = match handle {
         Ok(h) => h,
@@ -385,12 +311,7 @@ async fn connect_inner(params: ConnectParams) -> Result<ConnectResult> {
                 HostKeyCheck::Trusted => {}
             }
             return Err(AppError::Connection(format!(
-                "无法连接到 {host}:{port}（解析到 {}）— {e}",
-                target
-                    .iter()
-                    .map(|a| a.ip().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "无法连接到 {host}:{port} — {e}"
             )));
         }
     };
@@ -644,91 +565,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn address_cleanup_strips_ipv4_leading_zeros() {
+        // 零填充的内网/Tailscale 地址：过去整串会被当成域名送去 DNS
+        assert_eq!(
+            normalize_address("100.70.05.56", 22022),
+            ("100.70.5.56".to_string(), 22022)
+        );
+        assert_eq!(
+            normalize_address("100.070.05.056:22022", 22),
+            ("100.70.5.56".to_string(), 22022)
+        );
+        // 已经是标准写法的不受影响
+        assert_eq!(
+            normalize_address("10.0.0.5", 22),
+            ("10.0.0.5".to_string(), 22)
+        );
+    }
+
+    #[test]
     fn address_cleanup_splits_inline_port() {
         assert_eq!(
-            normalize_address(" 10.0.0.5 ", 22).unwrap(),
+            normalize_address(" 10.0.0.5 ", 22),
             ("10.0.0.5".to_string(), 22)
         );
         assert_eq!(
-            normalize_address("10.0.0.5:2222", 22).unwrap(),
+            normalize_address("10.0.0.5:2222", 22),
             ("10.0.0.5".to_string(), 2222)
         );
-        assert_eq!(
-            normalize_address("example.com:22", 22).unwrap(),
-            ("example.com".to_string(), 22)
-        );
     }
 
     #[test]
-    fn address_cleanup_keeps_bare_ipv6_intact() {
+    fn address_cleanup_leaves_unrecognized_input_alone() {
+        // 域名、IPv6、认不出的形态都原样交回，报错文案与改动前一致
         assert_eq!(
-            normalize_address("fe80::1", 22).unwrap(),
-            ("fe80::1".to_string(), 22)
-        );
-        assert_eq!(
-            normalize_address("[::1]:2222", 22).unwrap(),
-            ("::1".to_string(), 2222)
-        );
-        assert_eq!(
-            normalize_address("[::1]", 22).unwrap(),
-            ("::1".to_string(), 22)
-        );
-    }
-
-    #[test]
-    fn address_cleanup_rejects_ambiguous_input() {
-        // 这些输入过去只会在 DNS 那一步变成「未知的主机」，看不出真正原因
-        assert!(normalize_address("", 22).is_err());
-        assert!(normalize_address("   ", 22).is_err());
-        assert!(normalize_address("root@10.0.0.5", 22).is_err());
-        assert!(normalize_address(":2222", 22).is_err());
-        assert!(normalize_address("10.0.0.5:99999", 22).is_err());
-        assert!(normalize_address("[::1", 22).is_err());
-    }
-
-    #[test]
-    fn dns_lookup_failures_are_told_apart_from_socket_failures() {
-        // Windows: 11001 = WSAHOST_NOT_FOUND；Unix: -2 = EAI_NONAME
-        assert!(is_name_lookup_failure(&std::io::Error::from_raw_os_error(11001)));
-        assert!(is_name_lookup_failure(&std::io::Error::from_raw_os_error(-2)));
-        // 10061 = 连接被拒绝，属于网络/端口问题，不该报「解析不到名字」
-        assert!(!is_name_lookup_failure(&std::io::Error::from_raw_os_error(10061)));
-    }
-
-    #[test]
-    fn address_cleanup_strips_ipv4_leading_zeros() {
-        // 零填充的内网地址：过去整串会被当成域名送去 DNS，报一句看不懂的「查不到名字」
-        assert_eq!(
-            normalize_address("100.70.05.56", 22022).unwrap(),
-            ("100.70.5.56".to_string(), 22022)
-        );
-        assert_eq!(
-            normalize_address("100.070.05.056:22022", 22).unwrap(),
-            ("100.70.5.56".to_string(), 22022)
-        );
-        // 已经是标准写法的不受影响；域名与 IPv6 原样交给解析器
-        assert_eq!(
-            normalize_address("10.0.0.5", 22).unwrap(),
-            ("10.0.0.5".to_string(), 22)
-        );
-        assert_eq!(
-            normalize_address("host.tailnet.ts.net", 22).unwrap(),
+            normalize_address("host.tailnet.ts.net", 22),
             ("host.tailnet.ts.net".to_string(), 22)
         );
-    }
-
-    #[test]
-    fn address_cleanup_rejects_malformed_ipv4() {
-        // 写坏的四段数字不该再流到 DNS 那一步
-        assert!(normalize_address("100.70.05.256", 22).is_err());
-        assert!(normalize_address("100.70.05", 22).is_err());
-        assert!(normalize_address("100.70..56", 22).is_err());
-        assert!(normalize_address("0300.70.0.56", 22).is_err());
-        // 没有点的纯数字仍按主机名处理（内网可能有这样的短名）
+        assert_eq!(normalize_address("fe80::1", 22), ("fe80::1".to_string(), 22));
         assert_eq!(
-            normalize_address("192", 22).unwrap(),
-            ("192".to_string(), 22)
+            normalize_address("[::1]:2222", 22),
+            ("::1".to_string(), 2222)
         );
+        assert_eq!(normalize_address("[::1]", 22), ("::1".to_string(), 22));
+        assert_eq!(
+            normalize_address("root@10.0.0.5", 22),
+            ("root@10.0.0.5".to_string(), 22)
+        );
+        // 没有点的纯数字仍按主机名处理（内网可能有这样的短名）
+        assert_eq!(normalize_address("192", 22), ("192".to_string(), 22));
+        // 写坏的四段数字不做二次猜测
+        assert_eq!(
+            normalize_address("100.70.05.256", 22),
+            ("100.70.05.256".to_string(), 22)
+        );
+        assert_eq!(
+            normalize_address("100.70.05", 22),
+            ("100.70.05".to_string(), 22)
+        );
+        assert_eq!(
+            normalize_address("100.70..56", 22),
+            ("100.70..56".to_string(), 22)
+        );
+        assert_eq!(
+            normalize_address("0300.70.0.56", 22),
+            ("0300.70.0.56".to_string(), 22)
+        );
+        // 端口后缀认不出来时沿用端口字段的值
+        assert_eq!(
+            normalize_address("10.0.0.5:99999", 22),
+            ("10.0.0.5:99999".to_string(), 22)
+        );
+        assert_eq!(
+            normalize_address("10.0.0.5:0", 22),
+            ("10.0.0.5:0".to_string(), 22)
+        );
+        assert_eq!(normalize_address("", 22), ("".to_string(), 22));
     }
 
     #[test]
