@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { api, errorMessage, type TransferStatus } from "../lib/api";
 import type { TabStatus } from "../lib/tabs";
 import { notify } from "../lib/toast";
+import { getSettings } from "../lib/settings";
 import Icon from "./Icon";
 import ConfirmDialog from "./ConfirmDialog";
 import PromptDialog from "./PromptDialog";
@@ -103,7 +111,7 @@ function Toggle({
   title: string;
 }) {
   return (
-    <label className="switch" title={title}>
+    <label className="switch" data-tip={title}>
       <input
         type="checkbox"
         checked={checked}
@@ -140,11 +148,15 @@ export default function SftpPanel({
   const [path, setPath] = useState(".");
   const [entries, setEntries] = useState<RemoteEntry[]>([]);
   const [loading, setLoading] = useState(false);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   /** 用户手动导航过 —— 此时不跟随终端目录 */
   const [manual, setManual] = useState(false);
-  /** 待删除的远端条目：非空时弹确认框 */
-  const [deleting, setDeleting] = useState<RemoteEntry | null>(null);
+  /** 待删除的远端条目：非空时弹确认框（支持多选批量删除） */
+  const [deleting, setDeleting] = useState<RemoteEntry[] | null>(null);
+  /** 待重命名的远端条目 */
+  const [renaming, setRenaming] = useState<RemoteEntry | null>(null);
+  /** 待上传路径：与远端目录同名时需要先确认覆盖 */
+  const [pendingUpload, setPendingUpload] = useState<string[] | null>(null);
   /** 新建目录对话框 */
   const [creatingDir, setCreatingDir] = useState(false);
   /** 传输任务列表 */
@@ -161,6 +173,37 @@ export default function SftpPanel({
   connectedRef.current = connected;
   /** 已经提示过完成的传输，避免重复刷新目录 */
   const doneRef = useRef<Set<number>>(new Set());
+  /** Shift 多选的锚点 */
+  const anchorRef = useRef<string | null>(null);
+
+  /** 当前选中项 */
+  const selectedEntries = entries.filter((e) => selected.has(e.path));
+
+  /** 排序方式：目录始终在前，组内按所选字段排序 */
+  const [sortKey, setSortKey] = useState<"name" | "size" | "modified">("name");
+  const [sortAsc, setSortAsc] = useState(true);
+  /** 当前目录内的即时筛选关键字 */
+  const [filter, setFilter] = useState("");
+
+  const visibleEntries = useMemo(() => {
+    const keyword = filter.trim().toLowerCase();
+    const list = keyword
+      ? entries.filter((e) => e.name.toLowerCase().includes(keyword))
+      : entries;
+    return [...list].sort((a, b) => {
+      // 目录优先，文件在后；同类之间再按所选字段比较
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      let diff = 0;
+      if (sortKey === "name") {
+        diff = a.name.localeCompare(b.name, "zh-Hans-CN", { numeric: true });
+      } else if (sortKey === "size") {
+        diff = a.size - b.size;
+      } else {
+        diff = (a.modified ?? 0) - (b.modified ?? 0);
+      }
+      return sortAsc ? diff : -diff;
+    });
+  }, [entries, filter, sortKey, sortAsc]);
 
   const load = useCallback(
     async (target: string) => {
@@ -172,7 +215,8 @@ export default function SftpPanel({
         setEntries(listing.entries);
         // 用解析后的绝对路径，初始 "." 会变成用户主目录
         setPath(listing.path);
-        setSelected(null);
+        setSelected(new Set());
+        anchorRef.current = null;
       } catch (e) {
         onError(errorMessage(e));
       } finally {
@@ -222,33 +266,83 @@ export default function SftpPanel({
   const goUp = () => {
     if (!path.startsWith("/")) return;
     const parent = path.replace(/\/+$/, "").split("/").slice(0, -1).join("/");
+    setFilter("");
     navigate(parent || "/");
   };
 
   const enter = (entry: RemoteEntry) => {
     if (entry.isDir) {
+      // 换目录时清掉筛选，避免进入新目录后看不到任何条目
+      setFilter("");
       navigate(entry.path);
     } else {
-      setSelected(entry.path);
+      setSelected(new Set([entry.path]));
+      anchorRef.current = entry.path;
     }
   };
 
-  const download = async (entry: RemoteEntry) => {
+  /** 单击多选：Ctrl 切换、Shift 选区间、普通单击单选 */
+  const handleSelect = (entry: RemoteEntry, e: ReactMouseEvent) => {
+    if (e.shiftKey && anchorRef.current) {
+      // 区间选择必须按当前可见顺序（已排序 / 已过滤）进行
+      const from = visibleEntries.findIndex((x) => x.path === anchorRef.current);
+      const to = visibleEntries.findIndex((x) => x.path === entry.path);
+      if (from >= 0 && to >= 0) {
+        const [a, b] = from < to ? [from, to] : [to, from];
+        const next = new Set(e.ctrlKey || e.metaKey ? selected : []);
+        for (let i = a; i <= b; i++) next.add(visibleEntries[i].path);
+        setSelected(next);
+        return;
+      }
+    }
+    const additive = e.ctrlKey || e.metaKey;
+    if (additive) {
+      const next = new Set(selected);
+      if (next.has(entry.path)) next.delete(entry.path);
+      else next.add(entry.path);
+      setSelected(next);
+    } else {
+      setSelected(new Set([entry.path]));
+    }
+    anchorRef.current = entry.path;
+  };
+
+  /** 下载选中项：单个文件走「另存为」，多选或目录走「选择目录」 */
+  const downloadSelection = async () => {
+    const items = selectedEntries;
+    if (items.length === 0) return;
     try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const target = await save({
-        defaultPath: entry.name,
-        title: "保存到本地",
+      const { open, save } = await import("@tauri-apps/plugin-dialog");
+      if (items.length === 1 && !items[0].isDir) {
+        const target = await save({
+          defaultPath: items[0].name,
+          title: "保存到本地",
+        });
+        if (!target) return;
+        await api.sftpDownload(sessionId, items[0].path, target);
+        return;
+      }
+      const dir = await open({
+        directory: true,
+        multiple: false,
+        title: "选择保存目录",
       });
-      if (!target) return;
-      // 传输在后台跑，进度在面板底部展示
-      await api.sftpDownload(sessionId, entry.path, target);
+      if (typeof dir !== "string") return;
+      const base = dir.replace(/[\\/]+$/, "");
+      for (const item of items) {
+        await api.sftpDownload(
+          sessionId,
+          item.path,
+          `${base}\\${item.name}`
+        );
+      }
+      notify.success(`已开始下载 ${items.length} 项`);
     } catch (e) {
       onError(errorMessage(e));
     }
   };
 
-  /** 上传一个本地文件到当前远端目录 */
+  /** 上传一个本地文件或文件夹到当前远端目录（文件夹由后端递归） */
   const uploadOne = useCallback(
     async (local: string) => {
       const name = local.split(/[\\/]/).pop() ?? "file";
@@ -261,9 +355,27 @@ export default function SftpPanel({
   const upload = async () => {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const picked = await open({ multiple: false });
-      if (typeof picked !== "string") return;
-      await uploadOne(picked);
+      const picked = await open({ multiple: true, title: "选择要上传的文件" });
+      if (!picked) return;
+      const paths = typeof picked === "string" ? [picked] : picked;
+      startUpload(paths);
+    } catch (e) {
+      onError(errorMessage(e));
+    }
+  };
+
+  /** 上传本地文件夹（递归） */
+  const uploadFolder = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({
+        directory: true,
+        multiple: true,
+        title: "选择要上传的文件夹",
+      });
+      if (!picked) return;
+      const paths = typeof picked === "string" ? [picked] : picked;
+      startUpload(paths);
     } catch (e) {
       onError(errorMessage(e));
     }
@@ -275,7 +387,7 @@ export default function SftpPanel({
    * Tauri 的拖放事件是 webview 级的（整个窗口都能收到），
    * 因此要额外判断落点是否在面板内。
    */
-  const uploadPaths = useCallback(
+  const runUpload = useCallback(
     async (paths: string[]) => {
       if (paths.length === 0) return;
       let failed = 0;
@@ -290,11 +402,31 @@ export default function SftpPanel({
       if (failed === 0) {
         const count = paths.length;
         notify.success(
-          count === 1 ? "已开始上传" : `已开始上传 ${count} 个文件`
+          count === 1 ? "已开始上传" : `已开始上传 ${count} 项`
         );
       }
     },
     [uploadOne, onError]
+  );
+
+  /**
+   * 上传入口：远端目录已有同名条目且策略为覆盖时，先弹确认，避免静默覆盖。
+   * 文件夹只要根名不存在就不会覆盖已有目录；同名则会与远端目录合并。
+   */
+  const startUpload = useCallback(
+    (paths: string[]) => {
+      if (paths.length === 0) return;
+      const overwrite = getSettings().transfer.overwrite === "overwrite";
+      const clashes = overwrite
+        ? paths.filter((p) => {
+            const name = p.split(/[\\/]/).pop() ?? "";
+            return entries.some((e) => e.name === name);
+          })
+        : [];
+      if (clashes.length > 0) setPendingUpload(paths);
+      else void runUpload(paths);
+    },
+    [entries, runUpload]
   );
 
   // 传输进度轮询：进度由 Rust 侧维护，这里只做展示。
@@ -342,9 +474,9 @@ export default function SftpPanel({
     };
   }, [load]);
 
-  // 拖放：Tauri 的原生拖放事件
+  // 拖放：Tauri 的原生拖放事件（仅面板展开且会话已连接时生效）
   useEffect(() => {
-    if (collapsed) return;
+    if (collapsed || !connected) return;
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
@@ -370,7 +502,7 @@ export default function SftpPanel({
           } else if (p.type === "drop") {
             setDragOver(false);
             if (!hitPanel(p.position.x, p.position.y)) return;
-            void uploadPaths(p.paths);
+            void startUpload(p.paths);
           } else {
             setDragOver(false);
           }
@@ -387,19 +519,40 @@ export default function SftpPanel({
       unlisten?.();
       setDragOver(false);
     };
-  }, [collapsed, uploadPaths]);
+  }, [collapsed, connected, startUpload]);
 
   const confirmRemove = async () => {
-    const entry = deleting;
-    if (!entry) return;
+    const items = deleting;
+    if (!items || items.length === 0) return;
     setDeleting(null);
-    try {
-      await api.sftpRemove(sessionId, entry.path, entry.isDir);
-      notify.success(`已删除 ${entry.name}`);
-      void load(path);
-    } catch (e) {
-      onError(errorMessage(e));
+    let failed = 0;
+    for (const entry of items) {
+      try {
+        await api.sftpRemove(sessionId, entry.path, entry.isDir);
+      } catch (e) {
+        failed++;
+        onError(errorMessage(e));
+      }
     }
+    if (failed === 0) {
+      notify.success(
+        items.length === 1
+          ? `已删除 ${items[0].name}`
+          : `已删除 ${items.length} 项`
+      );
+    }
+    void load(path);
+  };
+
+  /** 重命名选中项（目录同样支持） */
+  const rename = async (name: string) => {
+    if (!renaming) return;
+    const dirPart = renaming.path.slice(0, renaming.path.lastIndexOf("/"));
+    const target = dirPart ? `${dirPart}/${name}` : `/${name}`;
+    await api.sftpRename(sessionId, renaming.path, target);
+    setRenaming(null);
+    notify.success(`已重命名为 ${name}`);
+    void load(path);
   };
 
   /** 由新建目录对话框调用；抛错时错误信息在对话框内展示 */
@@ -416,8 +569,9 @@ export default function SftpPanel({
     return (
       <div className="sftp-collapsed">
         <button
+          className="icon-btn"
           onClick={onToggle}
-          title={
+          data-tip={
             running > 0
               ? `展开文件面板 (Ctrl+Shift+F) · ${running} 个传输进行中`
               : "展开文件面板 (Ctrl+Shift+F)"
@@ -447,7 +601,8 @@ export default function SftpPanel({
           <button
             className="icon-btn"
             onClick={onToggle}
-            title="关闭面板 (Ctrl+Shift+F)"
+            data-tip="关闭面板 (Ctrl+Shift+F)"
+            aria-label="关闭面板"
           >
             <Icon name="close" />
           </button>
@@ -483,10 +638,20 @@ export default function SftpPanel({
               : "跟随终端当前目录（点击开启）"
           }
         />
-        <button className="icon-btn" onClick={() => load(path)} title="刷新">
+        <button
+          className="icon-btn"
+          onClick={() => load(path)}
+          data-tip="刷新"
+          aria-label="刷新"
+        >
           <Icon name="refresh" />
         </button>
-        <button className="icon-btn" onClick={onToggle} title="关闭面板 (Ctrl+Shift+F)">
+        <button
+          className="icon-btn"
+          onClick={onToggle}
+          data-tip="关闭面板 (Ctrl+Shift+F)"
+          aria-label="关闭面板"
+        >
           <Icon name="close" />
         </button>
       </div>
@@ -494,13 +659,13 @@ export default function SftpPanel({
       <div className="sftp-crumb" title={path}>
         <Icon name="home" size={13} />
         {segments.length === 0 ? (
-          <span className="seg">/</span>
+          <span className="seg current">/</span>
         ) : (
           segments.map((seg, i) => (
             <span key={i} style={{ display: "contents" }}>
               <span className="sep">/</span>
               <span
-                className="seg"
+                className={`seg ${i === segments.length - 1 ? "current" : ""}`}
                 onClick={() => navigate(crumbPath(i))}
                 title={crumbPath(i)}
               >
@@ -512,32 +677,111 @@ export default function SftpPanel({
       </div>
 
       <div className="sftp-toolbar">
-        <button className="btn" onClick={upload} title="上传本地文件">
+        <button
+          className="btn sm icon outline"
+          onClick={upload}
+          data-tip="上传本地文件（可多选）"
+          aria-label="上传本地文件"
+        >
           <Icon name="upload" size={13} />
-          上传
         </button>
         <button
-          className="btn"
-          disabled={!selected}
-          onClick={() => {
-            const entry = entries.find((e) => e.path === selected);
-            if (entry) download(entry);
-          }}
-          title="下载选中的文件"
+          className="btn sm icon outline"
+          onClick={uploadFolder}
+          data-tip="上传本地文件夹（递归）"
+          aria-label="上传本地文件夹"
+        >
+          <Icon name="folder" size={13} />
+        </button>
+        <button
+          className="btn sm icon outline"
+          disabled={selectedEntries.length === 0}
+          onClick={downloadSelection}
+          data-tip={
+            selectedEntries.length > 1
+              ? "下载选中项到指定目录"
+              : "下载选中的文件或目录"
+          }
+          aria-label="下载"
         >
           <Icon name="download" size={13} />
-          下载
         </button>
         <button
-          className="btn"
+          className="btn sm icon outline"
+          disabled={selectedEntries.length !== 1}
+          onClick={() => setRenaming(selectedEntries[0])}
+          data-tip="重命名选中项"
+          aria-label="重命名"
+        >
+          <Icon name="pencil" size={13} />
+        </button>
+        <button
+          className="btn sm icon outline"
+          disabled={selectedEntries.length === 0}
+          onClick={() => setDeleting(selectedEntries)}
+          data-tip="删除选中项"
+          aria-label="删除选中项"
+        >
+          <Icon name="trash" size={13} />
+        </button>
+        <button
+          className="btn sm icon outline"
           onClick={() => setCreatingDir(true)}
-          title="新建目录"
+          data-tip="新建目录"
+          aria-label="新建目录"
         >
           <Icon name="folder-plus" size={13} />
         </button>
-        <button className="btn" onClick={goUp} title="上级目录">
+        <button
+          className="btn sm icon outline"
+          onClick={goUp}
+          data-tip="上级目录"
+          aria-label="上级目录"
+        >
           <Icon name="arrow-left" size={13} />
         </button>
+      </div>
+
+      <div className="sftp-tools">
+        <input
+          className="sftp-filter"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="筛选当前目录"
+          aria-label="筛选当前目录"
+          spellCheck={false}
+        />
+        <div className="sftp-sort" role="group" aria-label="排序方式">
+          {(
+            [
+              ["name", "名称"],
+              ["size", "大小"],
+              ["modified", "时间"],
+            ] as const
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              className={`sftp-sort-btn ${sortKey === key ? "on" : ""}`}
+              aria-pressed={sortKey === key}
+              title={
+                sortKey === key
+                  ? `当前按${label}排序，点击${sortAsc ? "降序" : "升序"}`
+                  : `按${label}排序`
+              }
+              onClick={() => {
+                if (sortKey === key) {
+                  setSortAsc(!sortAsc);
+                } else {
+                  setSortKey(key);
+                  setSortAsc(true);
+                }
+              }}
+            >
+              {label}
+              {sortKey === key ? (sortAsc ? " ↑" : " ↓") : ""}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="sftp-cols">
@@ -550,27 +794,32 @@ export default function SftpPanel({
         {!loading && entries.length === 0 && (
           <div className="sftp-empty">空目录</div>
         )}
-        {entries.map((entry) => (
+        {!loading && entries.length > 0 && visibleEntries.length === 0 && (
+          <div className="sftp-empty">没有匹配「{filter.trim()}」的条目</div>
+        )}
+        {visibleEntries.map((entry) => (
           <div
             key={entry.path}
             className={`f-row ${entry.isDir ? "dir" : ""} ${
-              selected === entry.path ? "selected" : ""
+              selected.has(entry.path) ? "selected" : ""
             }`}
-            onClick={() => setSelected(entry.path)}
+            onClick={(e) => handleSelect(entry, e)}
             onDoubleClick={() => enter(entry)}
-            title={entry.path}
           >
             <Icon name={entry.isDir ? "folder" : "file"} className="fi" />
-            <span className="fname">{entry.name}</span>
+            <span className="fname" title={entry.path}>
+              {entry.name}
+            </span>
             <span className="fsize">
               {entry.isDir ? "" : formatSize(entry.size)}
             </span>
             <button
-              className="icon-btn f-del"
-              title="删除"
+              className="icon-btn sm danger f-del"
+              data-tip="删除"
+              aria-label="删除"
               onClick={(e) => {
                 e.stopPropagation();
-                setDeleting(entry);
+                setDeleting([entry]);
               }}
             >
               <Icon name="trash" size={12} />
@@ -632,8 +881,9 @@ export default function SftpPanel({
                 </div>
                 {t.cancellable && (
                   <button
-                    className="icon-btn"
-                    title="取消传输"
+                    className="icon-btn sm danger"
+                    data-tip="取消传输"
+                    aria-label="取消传输"
                     onClick={() => {
                       void api.cancelTransfer(t.id).catch(() => {});
                     }}
@@ -650,22 +900,27 @@ export default function SftpPanel({
       <div className="sftp-foot">
         {detached ? (
           <button
-            className="btn sm"
+            className="btn sm icon outline"
             onClick={() => {
               setManual(false);
               if (cwd) void load(cwd);
             }}
-            title="回到终端当前目录"
+            data-tip="回到终端当前目录"
+            aria-label="回到终端当前目录"
           >
             <Icon name="crosshair" size={12} />
-            回到终端目录
           </button>
-        ) : selected ? (
-          <span className="mono" title={selected}>
-            {selected.split("/").pop()}
+        ) : selectedEntries.length > 0 ? (
+          <span
+            className="mono"
+            title={selectedEntries.map((e) => e.path).join("\n")}
+          >
+            {selectedEntries.length === 1
+              ? selectedEntries[0].name
+              : `已选中 ${selectedEntries.length} 项`}
           </span>
         ) : (
-          <span>双击目录进入 · 选中后可下载</span>
+          <span>双击目录进入 · Ctrl/Shift 可多选</span>
         )}
         <span className="spacer" />
         {follow && cwd && !detached && (
@@ -673,7 +928,11 @@ export default function SftpPanel({
             <Icon name="crosshair" size={11} /> {cwd}
           </span>
         )}
-        <span>{entries.length} 项</span>
+        <span>
+          {filter.trim()
+            ? `${visibleEntries.length}/${entries.length} 项`
+            : `${entries.length} 项`}
+        </span>
       </div>
 
       {dragOver && (
@@ -706,15 +965,63 @@ export default function SftpPanel({
 
       {deleting && (
         <ConfirmDialog
-          title={deleting.isDir ? "删除目录" : "删除文件"}
+          title={
+            deleting.length > 1
+              ? `删除 ${deleting.length} 项`
+              : deleting[0].isDir
+                ? "删除目录"
+                : "删除文件"
+          }
           icon="trash"
           confirmText="删除"
           danger
           onCancel={() => setDeleting(null)}
           onConfirm={confirmRemove}
         >
-          确定删除远端{deleting.isDir ? "目录" : "文件"}「{deleting.name}」？
-          该操作不可恢复。
+          {deleting.length > 1
+            ? `确定删除选中的 ${deleting.length} 项？其中目录会连同内部所有内容一并删除，该操作不可恢复。`
+            : `确定删除远端${
+                deleting[0].isDir ? "目录" : "文件"
+              }「${deleting[0].name}」？${
+                deleting[0].isDir ? "目录内的所有内容会一并删除，" : ""
+              }该操作不可恢复。`}
+        </ConfirmDialog>
+      )}
+
+      {renaming && (
+        <PromptDialog
+          title="重命名"
+          icon="pencil"
+          label="新名称"
+          initialValue={renaming.name}
+          confirmText="重命名"
+          validate={(value) =>
+            value === "." || value === ".."
+              ? "名称不合法"
+              : value.includes("/")
+                ? "名称不能包含 /"
+                : null
+          }
+          onSubmit={rename}
+          onCancel={() => setRenaming(null)}
+        />
+      )}
+
+      {pendingUpload && (
+        <ConfirmDialog
+          title="覆盖上传"
+          icon="upload"
+          confirmText="覆盖上传"
+          danger
+          onCancel={() => setPendingUpload(null)}
+          onConfirm={() => {
+            const paths = pendingUpload;
+            setPendingUpload(null);
+            void runUpload(paths);
+          }}
+        >
+          远端当前目录已存在同名文件或目录，继续上传会覆盖已有内容（文件夹会与远端同名目录合并）。
+          确定继续？
         </ConfirmDialog>
       )}
     </div>

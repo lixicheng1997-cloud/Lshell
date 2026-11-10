@@ -1,38 +1,30 @@
 import Icon from "./Icon";
-import type { ThemeMode } from "../lib/theme";
 
 interface Props {
   search: string;
   onSearch: (v: string) => void;
-  theme: ThemeMode;
-  onCycleTheme: () => void;
   onForward: () => void;
   onShortcuts: () => void;
   onHistory: () => void;
   onAbout: () => void;
+  onSettings: () => void;
 }
 
 /**
  * 功能顶栏。
  *
- * 只承载「可操作的东西」：搜索、转发、历史、快捷键、关于、主题。
+ * 只承载「可操作的东西」：搜索、转发、历史、快捷键、关于、设置。
  * 新建主机放在侧栏标题行，这里不再重复一个入口。
  */
 export default function TopBar({
   search,
   onSearch,
-  theme,
-  onCycleTheme,
   onForward,
   onShortcuts,
   onHistory,
   onAbout,
+  onSettings,
 }: Props) {
-  const themeIcon =
-    theme === "dark" ? "moon" : theme === "light" ? "sun" : "monitor";
-  const themeLabel =
-    theme === "dark" ? "深色" : theme === "light" ? "浅色" : "跟随系统";
-
   return (
     <div className="topbar">
       <label className="omni">
@@ -47,33 +39,53 @@ export default function TopBar({
 
       <div className="spacer" />
 
-      <button className="btn" onClick={onForward} title="端口转发 (Ctrl+Shift+T)">
-        <Icon name="port-forward" />
-        转发
-      </button>
+      {/* 右上角动作组：只保留图标，中文名走统一的气泡提示 */}
+      <div className="topbar-actions">
+        <button
+          className="btn icon"
+          data-tip="端口转发 (Ctrl+Shift+T)"
+          aria-label="端口转发"
+          onClick={onForward}
+        >
+          <Icon name="port-forward" />
+        </button>
 
-      <button className="btn" onClick={onHistory} title="命令历史 (Ctrl+Shift+H)">
-        <Icon name="terminal" />
-        历史
-      </button>
+        <button
+          className="btn icon"
+          data-tip="命令历史 (Ctrl+Shift+H)"
+          aria-label="命令历史"
+          onClick={onHistory}
+        >
+          <Icon name="terminal" />
+        </button>
 
-      <button className="btn" onClick={onShortcuts} title="快捷键">
-        <Icon name="keyboard" />
-        快捷键
-      </button>
+        <button
+          className="btn icon"
+          data-tip="快捷键"
+          aria-label="快捷键"
+          onClick={onShortcuts}
+        >
+          <Icon name="keyboard" />
+        </button>
 
-      <button className="btn" onClick={onAbout} title="关于 Lshell">
-        <Icon name="info" />
-        关于
-      </button>
+        <button
+          className="btn icon"
+          data-tip="关于 Lshell"
+          aria-label="关于 Lshell"
+          onClick={onAbout}
+        >
+          <Icon name="info" />
+        </button>
 
-      <button
-        className="btn"
-        onClick={onCycleTheme}
-        title={`主题：${themeLabel}（点击切换）`}
-      >
-        <Icon name={themeIcon} />
-      </button>
+        <button
+          className="btn icon"
+          data-tip="设置 (Ctrl+,)"
+          aria-label="设置"
+          onClick={onSettings}
+        >
+          <Icon name="settings" />
+        </button>
+      </div>
     </div>
   );
 }

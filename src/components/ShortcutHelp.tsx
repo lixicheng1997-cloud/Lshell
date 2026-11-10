@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../lib/dialog";
 import { useShortcuts, type Shortcut } from "../lib/shortcuts";
 import Icon from "./Icon";
 
@@ -22,6 +23,8 @@ function pretty(combo: string): string[] {
 }
 
 export default function ShortcutHelp({ onClose, shortcuts }: Props) {
+  const { ref, dialogProps } = useDialogFocus<HTMLDivElement>();
+
   // 帮助面板打开时按 Escape 关闭
   useShortcuts([
     {
@@ -36,7 +39,13 @@ export default function ShortcutHelp({ onClose, shortcuts }: Props) {
       className="overlay"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="dialog" style={{ width: 440 }}>
+      <div
+        ref={ref}
+        {...dialogProps}
+        aria-label="快捷键"
+        className="dialog"
+        style={{ width: 440 }}
+      >
         <header>
           <Icon name="keyboard" size={15} />
           快捷键
