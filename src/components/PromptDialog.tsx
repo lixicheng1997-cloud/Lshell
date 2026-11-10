@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { createPortal } from "react-dom";
 import { errorMessage } from "../lib/api";
+import { useDialogFocus } from "../lib/dialog";
 import Icon, { type IconName } from "./Icon";
 
 interface Props {
@@ -34,6 +35,7 @@ export default function PromptDialog({
   onSubmit,
   onCancel,
 }: Props) {
+  const { ref, dialogProps } = useDialogFocus<HTMLDivElement>();
   const [value, setValue] = useState(initialValue);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -73,7 +75,13 @@ export default function PromptDialog({
         }
       }}
     >
-      <div className="dialog" style={{ width: 420 }}>
+      <div
+        ref={ref}
+        {...dialogProps}
+        aria-label={title}
+        className="dialog"
+        style={{ width: 420 }}
+      >
         <header>
           <Icon name={icon} size={15} />
           {title}
@@ -90,6 +98,7 @@ export default function PromptDialog({
           <div className="field">
             <label>{label}</label>
             <input
+              className="input-flat"
               value={value}
               onChange={(e) => setValue(e.target.value)}
               placeholder={placeholder}

@@ -246,6 +246,13 @@ async fn supervisor_reconnects_after_silent_link_failure() {
         port: proxy_port,
         username: USER.into(),
         password: Some(PASSWORD.into()),
+        use_agent: false,
+        keyboard_interactive: false,
+        proxy: None,
+        jump: None,
+        term: String::new(),
+        encoding: "utf-8".into(),
+        startup_command: String::new(),
         key_path: None,
         key_passphrase: None,
         known_hosts: vec![(
@@ -262,6 +269,7 @@ async fn supervisor_reconnects_after_silent_link_failure() {
     let connected = match ssh::connect(params).await.expect("首次连接失败") {
         ConnectResult::Connected(s) => s,
         ConnectResult::NeedsHostKeyTrust { .. } => panic!("主机密钥应已被信任"),
+        ConnectResult::HostKeyChanged { .. } => panic!("主机密钥指纹不应发生变化"),
     };
 
     // 帧收集通道
@@ -270,9 +278,16 @@ async fn supervisor_reconnects_after_silent_link_failure() {
         let _ = tx.send(frame);
     });
 
-    let attachment = session::attach_terminal(&connected, sink.clone())
-        .await
-        .expect("挂载终端失败");
+    let attachment = session::attach_terminal_with(
+        &connected,
+        sink.clone(),
+        None,
+        "",
+        "utf-8",
+        "",
+    )
+    .await
+    .expect("挂载终端失败");
     let writer = Arc::clone(&attachment.writer);
 
     {
@@ -282,7 +297,11 @@ async fn supervisor_reconnects_after_silent_link_failure() {
             ActiveSession {
                 host_id: 1,
                 alias: "mock".into(),
+                net: session::NetCounters::default(),
                 writer: Arc::clone(&writer),
+                encoder: lshell_lib::textcodec::Encoder::new(
+                    lshell_lib::textcodec::Charset::Utf8,
+                ),
                 sftp: Arc::new(tokio::sync::Mutex::new(None)),
                 conn: Arc::new(tokio::sync::Mutex::new(connected.clone())),
                 state: SessionState::Connected,
@@ -301,6 +320,7 @@ async fn supervisor_reconnects_after_silent_link_failure() {
         alias: "mock".into(),
         spec,
         forwards: Vec::<ForwardRule>::new(),
+        auto_reconnect: true,
     };
     let _supervisor = session::spawn_supervisor(ctx, attachment, sink, sessions.clone());
 

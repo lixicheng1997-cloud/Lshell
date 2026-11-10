@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新提交会取消上一次未完成的检查
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Type-check, build, test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # tauri::generate_context! 在编译期需要前端产物，所以必须先构建前端
+      - name: Generate assets
+        run: npm run assets
+
+      - name: Type-check and build frontend
+        run: npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Cargo check (all targets)
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Cargo test (unit tests)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      # 注意：这里刻意不跑 `tauri build`，也不注入签名私钥。
+      # 打包与 updater 签名属于发布流程，见 docs/updater-release.md。

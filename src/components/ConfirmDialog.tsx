@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useDialogFocus } from "../lib/dialog";
 import Icon, { type IconName } from "./Icon";
 
 interface Props {
@@ -32,6 +33,8 @@ export default function ConfirmDialog({
   onConfirm,
   onCancel,
 }: Props) {
+  const { ref, dialogProps } = useDialogFocus<HTMLDivElement>();
+
   return createPortal(
     <div
       className="overlay"
@@ -43,7 +46,13 @@ export default function ConfirmDialog({
         }
       }}
     >
-      <div className="dialog" style={{ width: 400 }}>
+      <div
+        ref={ref}
+        {...dialogProps}
+        aria-label={title}
+        className="dialog"
+        style={{ width: 400 }}
+      >
         <header>
           <Icon name={icon} size={15} />
           {title}

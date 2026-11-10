@@ -32,10 +32,11 @@ fn test_params() -> Option<ssh::ConnectParams> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(22);
     let fingerprint = env_or("LSHELL_TEST_FINGERPRINT").unwrap_or_default();
+    let algo = env_or("LSHELL_TEST_ALGO").unwrap_or_else(|| "Ed25519".into());
     let known_hosts = if fingerprint.is_empty() {
         Vec::new()
     } else {
-        vec![(host.clone(), port as i64, "ssh-ed25519".to_string(), fingerprint)]
+        vec![(host.clone(), port as i64, algo, fingerprint)]
     };
 
     Some(ssh::ConnectParams {
@@ -44,6 +45,10 @@ fn test_params() -> Option<ssh::ConnectParams> {
         username: user,
         password: Some(pass),
         private_key: None,
+        use_agent: false,
+        keyboard_interactive: false,
+        proxy: None,
+        jump: None,
         known_hosts,
         keepalive: None,
         timeout: None,
@@ -57,6 +62,10 @@ async fn connect_sftp() -> Option<Arc<russh_sftp::client::SftpSession>> {
         Ok(ConnectResult::Connected(s)) => s,
         Ok(ConnectResult::NeedsHostKeyTrust { .. }) => {
             eprintln!("跳过：需要先信任主机密钥");
+            return None;
+        }
+        Ok(ConnectResult::HostKeyChanged { .. }) => {
+            eprintln!("跳过：主机密钥已变更，需先确认更新");
             return None;
         }
         Err(e) => {

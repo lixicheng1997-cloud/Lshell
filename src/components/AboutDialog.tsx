@@ -1,4 +1,5 @@
 import { createPortal } from "react-dom";
+import { useDialogFocus } from "../lib/dialog";
 import { useShortcuts } from "../lib/shortcuts";
 import type { AppInfo } from "../lib/types";
 import Brand from "./Brand";
@@ -17,6 +18,8 @@ interface Props {
  * 与安装包里的 Publisher、exe 版本资源同源，不会各写一份。
  */
 export default function AboutDialog({ info, onClose }: Props) {
+  const { ref, dialogProps } = useDialogFocus<HTMLDivElement>();
+
   // 打开时按 Escape 关闭
   useShortcuts([
     {
@@ -31,7 +34,13 @@ export default function AboutDialog({ info, onClose }: Props) {
       className="overlay"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="dialog" style={{ width: 400 }}>
+      <div
+        ref={ref}
+        {...dialogProps}
+        aria-label="关于 Lshell"
+        className="dialog"
+        style={{ width: 400 }}
+      >
         <header>
           <Icon name="info" size={15} />
           关于

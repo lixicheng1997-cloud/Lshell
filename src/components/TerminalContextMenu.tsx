@@ -104,7 +104,7 @@ export default function TerminalContextMenu({ x, y, items, onClose }: Props) {
         >
           <span className="ctx-label">
             {item.icon && <Icon name={item.icon} size={13} className="ctx-icon" />}
-            {item.label}
+            <span className="ctx-text">{item.label}</span>
           </span>
           {item.shortcut && <span className="ctx-shortcut">{item.shortcut}</span>}
         </button>
