@@ -6,8 +6,13 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { api, errorMessage } from "../lib/api";
+import { api, errorMessage, type UpdateInfo } from "../lib/api";
 import { useDialogFocus } from "../lib/dialog";
+import {
+  formatBytes,
+  requestUpdateCheck,
+  useUpdateState,
+} from "../lib/update";
 import { useShortcuts } from "../lib/shortcuts";
 import { notify } from "../lib/toast";
 import type { KnownHost } from "../lib/types";
@@ -50,12 +55,18 @@ const PAGES: { id: PageId; title: string }[] = [
 
 interface Props {
   onClose: () => void;
+  /** 更新功能是否开启（后端 updater::FEATURE_ENABLED 决定） */
+  updateEnabled?: boolean;
+  /** 打开现有的更新弹层（下载/安装流程复用 UpdateDialog） */
+  onShowUpdate: (info: UpdateInfo) => void;
 }
 
 interface PageProps {
   draft: Settings;
   onChange: (key: SettingsKey, value: string | number | boolean) => void;
   onReset: (keys: SettingsKey[]) => void;
+  updateEnabled?: boolean;
+  onShowUpdate?: (info: UpdateInfo) => void;
 }
 
 // ---------- 通用控件 ----------
@@ -859,7 +870,114 @@ function StatusBarPage({ draft, onChange, onReset }: PageProps) {
   );
 }
 
-function DiagnosticsPage({ draft, onChange, onReset }: PageProps) {
+/**
+ * 更新检查区块。
+ *
+ * 检查结果放在全局 store（lib/update.ts）里，而不是组件 state：
+ * 关掉设置弹层再打开，上次的检查结果仍然在；检查中重复点击也只发一个请求。
+ * 点击立即发起请求，与设置草稿模型无关，也不受「保存」影响。
+ */
+function UpdateSection({
+  onShowUpdate,
+}: {
+  onShowUpdate?: (info: UpdateInfo) => void;
+}) {
+  const state = useUpdateState();
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .appInfo()
+      .then((info) => {
+        if (alive) setVersion(info.version);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const checking = state.phase === "checking";
+  const info = state.info;
+  const failure = state.failure;
+  const checkedAt = state.checkedAt
+    ? new Date(state.checkedAt).toLocaleTimeString("zh-CN", { hour12: false })
+    : "";
+
+  return (
+    <Section title="版本更新">
+      <Row label="当前版本">
+        <span className="mono update-version-now">{version || "读取中…"}</span>
+      </Row>
+
+      {state.phase === "idle" && (
+        <div className="settings-note">
+          启动约 30 秒后会自动静默检查一次；也可以现在手动检查。
+          发现新版本只会先提示，下载和重启都需要你确认。
+        </div>
+      )}
+
+      {checking && <div className="update-state checking">正在检查更新…</div>}
+
+      {state.phase === "uptodate" && (
+        <div className="update-state ok">
+          已是最新版本{version ? ` v${version}` : ""}
+          {checkedAt ? ` · 检查于 ${checkedAt}` : ""}
+        </div>
+      )}
+
+      {state.phase === "available" && info && (
+        <div className="update-state found">
+          <div className="update-headline">发现新版本 v{info.version}</div>
+          <div className="update-meta">
+            当前 v{info.currentVersion}
+            {info.date ? ` · 发布于 ${info.date}` : ""}
+            {` · 安装包 ${formatBytes(info.size)}`}
+          </div>
+          {info.notes && <div className="update-notes">{info.notes}</div>}
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => onShowUpdate?.(info)}
+          >
+            下载并安装
+          </button>
+        </div>
+      )}
+
+      {state.phase === "error" && failure && (
+        <div className="update-state error">
+          <div className="update-headline">{failure.title}</div>
+          <div className="update-meta">{failure.detail}</div>
+          <div className="update-advice">{failure.advice}</div>
+          {checkedAt && <div className="update-meta">检查于 {checkedAt}</div>}
+        </div>
+      )}
+
+      <div className="settings-page-footer">
+        <button
+          type="button"
+          className="btn"
+          disabled={checking}
+          onClick={() => {
+            void requestUpdateCheck();
+          }}
+        >
+          {checking ? "检查中…" : "检查更新"}
+        </button>
+      </div>
+    </Section>
+  );
+}
+
+function DiagnosticsPage({
+  draft,
+  onChange,
+  onReset,
+  updateEnabled,
+  onShowUpdate,
+}: PageProps) {
   const [known, setKnown] = useState<KnownHost[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -901,21 +1019,7 @@ function DiagnosticsPage({ draft, onChange, onReset }: PageProps) {
         </Row>
       </Section>
 
-      <Section title="版本更新">
-        <div className="settings-note">
-          启动约 30 秒后会自动静默检查一次；也可以在这里手动检查。
-          发现新版本只会先提示，下载和重启都需要你确认。
-        </div>
-        <div className="settings-page-footer">
-          <button
-            type="button"
-            className="btn"
-            onClick={() => window.dispatchEvent(new CustomEvent("lshell:check-update"))}
-          >
-            检查更新
-          </button>
-        </div>
-      </Section>
+      {updateEnabled && <UpdateSection onShowUpdate={onShowUpdate} />}
 
       <Section title="命令历史">
         <Row
@@ -997,7 +1101,11 @@ function DiagnosticsPage({ draft, onChange, onReset }: PageProps) {
  * - 点「关闭」/ Esc / 点遮罩时，如果有改动会先确认，确认后直接丢弃草稿；
  * - 「恢复本页默认」也只是把 draft 改回默认值，保存时才删除数据库键。
  */
-export default function SettingsDialog({ onClose }: Props) {
+export default function SettingsDialog({
+  onClose,
+  updateEnabled,
+  onShowUpdate,
+}: Props) {
   const { ref, dialogProps } = useDialogFocus<HTMLDivElement>();
   const [page, setPage] = useState<PageId>("appearance");
   const [baseline] = useState(() => cloneSettings(getSettings()));
@@ -1112,7 +1220,13 @@ export default function SettingsDialog({ onClose }: Props) {
 
   const title = PAGES.find((p) => p.id === page)?.title ?? "";
 
-  const pageProps: PageProps = { draft, onChange, onReset };
+  const pageProps: PageProps = {
+    draft,
+    onChange,
+    onReset,
+    updateEnabled,
+    onShowUpdate,
+  };
 
   const renderPage = () => {
     switch (page) {

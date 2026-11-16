@@ -2,8 +2,13 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import Icon from "./Icon";
-import { api, errorMessage, type UpdateInfo, type UpdateProgress } from "../lib/api";
+import { api, type UpdateInfo, type UpdateProgress } from "../lib/api";
 import { useDialogFocus } from "../lib/dialog";
+import {
+  describeUpdateFailure,
+  formatBytes,
+  type UpdateFailureDetail,
+} from "../lib/update";
 import { notify } from "../lib/toast";
 
 interface Props {
@@ -23,7 +28,7 @@ export default function UpdateDialog({ info, onClose }: Props) {
   const { ref, dialogProps } = useDialogFocus<HTMLDivElement>();
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<UpdateFailureDetail | null>(null);
 
   useEffect(() => {
     if (phase !== "downloading") return;
@@ -53,7 +58,7 @@ export default function UpdateDialog({ info, onClose }: Props) {
       setPhase("ready");
     } catch (e) {
       setPhase("idle");
-      setError(errorMessage(e));
+      setError(describeUpdateFailure(e));
     }
   };
 
@@ -64,7 +69,8 @@ export default function UpdateDialog({ info, onClose }: Props) {
       // Windows 上安装器会结束当前进程，成功返回时通常已经在退出途中
     } catch (e) {
       setPhase("ready");
-      notify.error(errorMessage(e));
+      const failure = describeUpdateFailure(e);
+      notify.error(`${failure.title}：${failure.advice}`);
     }
   };
 
@@ -102,6 +108,7 @@ export default function UpdateDialog({ info, onClose }: Props) {
                 Lshell <strong>{info.currentVersion}</strong> →{" "}
                 <strong>{info.version}</strong>
                 {info.date ? `（${info.date} 发布）` : ""}
+                {info.size != null ? ` · ${formatBytes(info.size)}` : ""}
               </span>
             </div>
           )}
@@ -160,7 +167,13 @@ export default function UpdateDialog({ info, onClose }: Props) {
           {error && (
             <div className="banner warn">
               <Icon name="alert-triangle" />
-              <span>{error}</span>
+              <span>
+                <strong>{error.title}</strong>
+                <br />
+                {error.advice}
+                <br />
+                <span className="update-error-detail">{error.detail}</span>
+              </span>
             </div>
           )}
         </div>
@@ -196,10 +209,4 @@ export default function UpdateDialog({ info, onClose }: Props) {
     </div>,
     document.body
   );
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }

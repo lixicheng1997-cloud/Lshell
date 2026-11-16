@@ -75,8 +75,12 @@ export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
   /** 显式退出（绕过「关闭到托盘」） */
   exitApp: () => invoke<void>("exit_app"),
+  /** 托盘图标是否真的创建成功；失败时关闭窗口应该直接退出而不是隐藏 */
+  trayAvailable: () => invoke<boolean>("tray_available"),
 
   // 自动更新
+  /** 更新功能是否开启（由后端 updater::FEATURE_ENABLED 统一控制） */
+  updateEnabled: () => invoke<boolean>("update_enabled"),
   /** 查询更新；没有新版本时返回 null */
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
   /** 下载并校验更新包，暂存待安装 */
@@ -281,6 +285,8 @@ export interface UpdateInfo {
   notes: string;
   /** 发布日期，可能为空 */
   date: string | null;
+  /** 安装包大小（字节）；服务端未提供时为空 */
+  size: number | null;
 }
 
 /** 更新包下载进度 */

@@ -2995,6 +2995,81 @@ html[data-theme="light"] .tag-select-trigger {
   margin-top: var(--sp-4);
 }
 
+/* ---------- 设置页：更新检查区块 ---------- */
+
+.update-version-now {
+  font-size: var(--fs-aux);
+  color: var(--fg-muted);
+}
+
+.update-state {
+  margin-bottom: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-aux);
+  color: var(--fg-muted);
+  line-height: 1.6;
+}
+
+.update-state.checking {
+  border-left-color: var(--accent-line);
+  color: var(--fg);
+}
+
+.update-state.ok {
+  border-left-color: var(--ok, var(--accent-line));
+}
+
+.update-state.found {
+  border-left-color: var(--accent-line);
+}
+
+.update-state.error {
+  border-left-color: var(--warn, #d9534f);
+}
+
+.update-headline {
+  margin-bottom: 2px;
+  font-size: var(--fs-body, 13px);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.update-meta {
+  color: var(--fg-faint);
+  word-break: break-all;
+}
+
+.update-advice {
+  margin-top: 4px;
+  color: var(--fg-muted);
+}
+
+.update-notes {
+  max-height: 160px;
+  overflow: auto;
+  margin: var(--sp-2) 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-app);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.update-state.found .btn {
+  margin-top: var(--sp-2);
+}
+
+.update-error-detail {
+  color: var(--fg-faint);
+  font-size: var(--fs-aux);
+  word-break: break-all;
+}
+
 .settings-known {
   border: 1px solid var(--line-strong);
   border-radius: var(--r-sm);
