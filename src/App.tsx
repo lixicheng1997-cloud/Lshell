@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "./lib/api";
 import type { UpdateInfo } from "./lib/api";
+import { requestUpdateCheck } from "./lib/update";
 import type { AppInfo, Group, Host, Tag } from "./lib/types";
 import { useTabs, statusDotClass } from "./lib/tabs";
 import { useShortcuts, type Shortcut } from "./lib/shortcuts";
@@ -307,25 +308,49 @@ export default function App() {
 
   // ---------- 自动更新 ----------
 
+  /**
+   * 更新功能的开关只有后端一处（`updater::FEATURE_ENABLED`），
+   * 前端启动时读一次。默认 false：开关没读到之前不渲染任何更新入口，
+   * 也不会发更新请求。
+   */
+  const [updateEnabled, setUpdateEnabled] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .updateEnabled()
+      .then((enabled) => {
+        if (alive) setUpdateEnabled(enabled);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const checkForUpdate = useCallback(async (manual: boolean) => {
-    try {
-      const info = await api.checkUpdate();
-      if (info) setUpdateInfo(info);
-      else if (manual) notify.info("当前已是最新版本");
-    } catch (e) {
+    // 与设置页共用同一个检查入口：重复触发会复用同一个请求
+    const result = await requestUpdateCheck();
+    if (result.status === "available") {
+      setUpdateInfo(result.info);
+    } else if (manual && result.status === "uptodate") {
+      notify.info("当前已是最新版本");
+    } else if (manual && result.status === "error") {
       // 静默检查失败（断网、更新源不可达）不打扰用户
-      if (manual) notify.error(errorMessage(e));
+      notify.error(result.failure.title);
     }
   }, []);
 
   // 启动 30 秒后静默检查一次，避开启动阶段的连接与渲染
   useEffect(() => {
+    if (!updateEnabled) return;
     const timer = setTimeout(() => checkForUpdate(false), 30_000);
     return () => clearTimeout(timer);
-  }, [checkForUpdate]);
+  }, [checkForUpdate, updateEnabled]);
 
-  // 托盘菜单「检查更新」与设置页入口
+  // 托盘菜单「检查更新」（设置页的按钮直接读全局状态，不再走窗口事件）
   useEffect(() => {
+    if (!updateEnabled) return;
     let unlisten: (() => void) | undefined;
     (async () => {
       try {
@@ -335,13 +360,10 @@ export default function App() {
         // 浏览器预览环境没有事件 API
       }
     })();
-    const onLocal = () => checkForUpdate(true);
-    window.addEventListener("lshell:check-update", onLocal);
     return () => {
-      window.removeEventListener("lshell:check-update", onLocal);
       unlisten?.();
     };
-  }, [checkForUpdate]);
+  }, [checkForUpdate, updateEnabled]);
 
   // 自动转发起步失败：后端汇总后一次性通知，避免每条规则弹一次
   useEffect(() => {
@@ -376,6 +398,22 @@ export default function App() {
 
   // ---------- 关闭到托盘 ----------
 
+  /** 托盘是否可用；不可用时关闭窗口必须直接退出，否则窗口藏起来就再也找不回来 */
+  const [trayReady, setTrayReady] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .trayAvailable()
+      .then((ok) => {
+        if (alive) setTrayReady(ok);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     (async () => {
@@ -383,21 +421,31 @@ export default function App() {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
         unlisten = await win.onCloseRequested(async (event) => {
+          // 不收起时直接放行，窗口正常关闭并退出
           if (!getSettings().behavior.closeToTray) return;
+          // 托盘不可用时不隐藏，否则用户无法再唤回窗口
+          if (!trayReady) return;
+
           event.preventDefault();
           // 第一次给一次性说明，用户确认后再隐藏
           if (localStorage.getItem(TRAY_HINT_KEY) !== "1") {
             setTrayHint(true);
             return;
           }
-          await win.hide();
+          try {
+            await win.hide();
+          } catch (e) {
+            // 隐藏失败（多半是权限问题）就真正退出，避免「点了关闭没反应」
+            notify.error(`收起到托盘失败，正在退出：${errorMessage(e)}`);
+            await api.exitApp().catch(() => {});
+          }
         });
       } catch {
         // 浏览器预览环境没有窗口 API
       }
     })();
     return () => unlisten?.();
-  }, []);
+  }, [trayReady]);
 
   const confirmTrayHint = async () => {
     localStorage.setItem(TRAY_HINT_KEY, "1");
@@ -405,8 +453,10 @@ export default function App() {
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       await getCurrentWindow().hide();
-    } catch {
-      // 忽略
+    } catch (e) {
+      // 隐藏不了就退出，避免窗口停在原地让用户以为按钮失效
+      notify.error(`收起到托盘失败，正在退出：${errorMessage(e)}`);
+      await api.exitApp().catch(() => {});
     }
   };
 
@@ -421,6 +471,13 @@ export default function App() {
   // 全局快捷键
   const shortcuts = useMemo<Shortcut[]>(
     () => [
+      // 仅用于快捷键帮助展示、不参与全局注册的条目
+      {
+        combo: "ctrl+wheel",
+        description: "缩放终端",
+        hintOnly: true,
+        handler: () => {},
+      },
       {
         combo: "mod+k",
         description: "聚焦搜索框",
@@ -464,8 +521,8 @@ export default function App() {
         description: "打开命令历史",
         handler: () => setShowHistory(true),
       },
-      // 第 1–9 个标签
-      ...Array.from({ length: 9 }, (_, i) => ({
+      // 标签只保留前两个的快捷切换（Ctrl+1 / Ctrl+2）
+      ...Array.from({ length: 2 }, (_, i) => ({
         combo: `mod+${i + 1}`,
         description: `切换到第 ${i + 1} 个标签`,
         handler: () => {
@@ -503,8 +560,12 @@ export default function App() {
       if (action === "minimize") await win.minimize();
       else if (action === "toggle") await win.toggleMaximize();
       else await win.close();
-    } catch {
-      // 浏览器预览环境没有窗口 API
+    } catch (e) {
+      // 浏览器预览环境没有窗口 API，静默即可；其它情况要让用户看到原因，
+      // 避免再次出现「点了关闭没有任何反应」
+      if ("__TAURI_INTERNALS__" in window) {
+        notify.error(`窗口操作失败：${errorMessage(e)}`);
+      }
     }
   };
 
@@ -844,10 +905,15 @@ export default function App() {
       )}
 
       {showSettings && (
-        <SettingsDialog onClose={() => setShowSettings(false)} />
+        <SettingsDialog
+          onClose={() => setShowSettings(false)}
+          updateEnabled={updateEnabled}
+          // 保持在设置弹层之上打开更新弹层：关闭更新后还能回到检查结果
+          onShowUpdate={(info) => setUpdateInfo(info)}
+        />
       )}
 
-      {updateInfo && (
+      {updateEnabled && updateInfo && (
         <UpdateDialog info={updateInfo} onClose={() => setUpdateInfo(null)} />
       )}
 

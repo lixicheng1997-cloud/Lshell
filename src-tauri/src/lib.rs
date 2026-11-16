@@ -21,7 +21,7 @@ pub mod vault;
 
 use session::SessionManager;
 use state::AppState;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{IsMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 
@@ -32,6 +32,15 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+/// 托盘图标当前是否真的存在。
+///
+/// 前端用它决定「关闭窗口」是收进托盘还是直接退出：
+/// 托盘没建起来时如果还把窗口藏了，用户就再也找不回来。
+#[tauri::command]
+fn tray_available(app: tauri::AppHandle) -> bool {
+    app.tray_by_id("main").is_some()
 }
 
 /// 应用数据目录：%APPDATA%/Lshell
@@ -52,6 +61,10 @@ pub fn data_dir() -> std::path::PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // reqwest 编译时用了 rustls-no-provider，必须有一个进程级 crypto provider。
+    // updater 插件在请求前也会装，这里提前装一次，保证更新检查里的 HEAD 请求可用。
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let db = db::Db::open(&data_dir().join("lshell.db")).expect("打开数据库失败");
     let state = AppState::new(db).expect("初始化保险库失败");
     let sessions = session::SharedSessions::new(tokio::sync::Mutex::new(SessionManager::new()));
@@ -68,9 +81,25 @@ pub fn run() {
         .manage(updater::PendingUpdate::default())
         .setup(|app| {
             let show = MenuItem::with_id(app, "tray-show", "显示主窗口", true, None::<&str>)?;
-            let check = MenuItem::with_id(app, "tray-check", "检查更新", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "tray-quit", "退出 Lshell", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &check, &quit])?;
+            // 更新入口由 updater::FEATURE_ENABLED 统一控制
+            let check = if updater::FEATURE_ENABLED {
+                Some(MenuItem::with_id(
+                    app,
+                    "tray-check",
+                    "检查更新",
+                    true,
+                    None::<&str>,
+                )?)
+            } else {
+                None
+            };
+            let mut items: Vec<&dyn IsMenuItem<_>> = vec![&show];
+            if let Some(item) = &check {
+                items.push(item);
+            }
+            items.push(&quit);
+            let menu = Menu::with_items(app, &items)?;
 
             let mut tray = TrayIconBuilder::with_id("main")
                 .menu(&menu)
@@ -112,6 +141,8 @@ pub fn run() {
             commands::app_data_dir,
             commands::app_info,
             commands::exit_app,
+            tray_available,
+            updater::update_enabled,
             updater::check_update,
             updater::download_update,
             updater::apply_update,

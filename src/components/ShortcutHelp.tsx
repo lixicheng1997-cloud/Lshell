@@ -13,6 +13,8 @@ const LABELS: Record<string, string> = {
   ctrl: "Ctrl",
   shift: "Shift",
   alt: "Alt",
+  // 滚轮不是键盘键，单独给个中文名，避免渲染成 "WHEEL"
+  wheel: "滚轮",
 };
 
 /** 把 "mod+shift+f" 拆成 ["Ctrl", "Shift", "F"]，逐键渲染 */

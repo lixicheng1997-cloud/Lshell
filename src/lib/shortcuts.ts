@@ -11,6 +11,13 @@ export interface Shortcut {
   combo: string;
   description: string;
   handler: (e: KeyboardEvent) => void;
+  /**
+   * 仅用于帮助面板展示，不注册全局监听。
+   *
+   * 适用于由其它组件自己处理的组合（例如终端的 Ctrl+滚轮 缩放），
+   * 这样帮助列表与实际行为仍从同一份列表生成，不会写两遍。
+   */
+  hintOnly?: boolean;
 }
 
 interface ParsedCombo {
@@ -67,7 +74,9 @@ export function useShortcuts(shortcuts: Shortcut[], enabled = true) {
   useEffect(() => {
     if (!enabled) return;
 
-    const parsed = shortcuts.map((s) => ({ ...s, p: parseCombo(s.combo) }));
+    const parsed = shortcuts
+      .filter((s) => !s.hintOnly)
+      .map((s) => ({ ...s, p: parseCombo(s.combo) }));
 
     const onKeyDown = (e: KeyboardEvent) => {
       // 在输入框里不拦截，让用户正常打字
