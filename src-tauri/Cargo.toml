@@ -1,6 +1,6 @@
 [package]
 name = "lshell"
-version = "1.0.0"
+version = "1.3.0"
 description = "Lshell - 轻量级 Windows SSH 客户端"
 authors = ["xichengli"]
 edition = "2021"
@@ -14,8 +14,20 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
+# 第二实例启动时唤出已有窗口，避免两个进程同时写同一个 SQLite 库
+tauri-plugin-single-instance = "2"
+# 自动更新：静态 latest.json + minisign 签名校验
+tauri-plugin-updater = "2"
+# 仅用于检查更新后读取安装包大小（HEAD Content-Length）。
+# 与 updater 插件使用同一份 reqwest，特性取并集，不会新增编译单元。
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls-no-provider",
+] }
+# 与 updater 插件使用同一份 rustls；启动时安装 ring provider，
+# 供上面 HEAD 请求使用（reqwest 的 rustls-no-provider 不带默认 provider）
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

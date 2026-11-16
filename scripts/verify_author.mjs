@@ -85,7 +85,7 @@ if (!existsSync(exe)) {
   check("CompanyName", info.CompanyName);
   check("LegalCopyright", info.LegalCopyright, `Copyright © 2026 ${EXPECTED}`);
   check("ProductName", info.ProductName, "Lshell");
-  check("ProductVersion", info.ProductVersion, "1.0.0");
+  check("ProductVersion", info.ProductVersion, "1.3.0");
 
   // 控制台可能把 © 显示成 ?，用字节再确认一次
   const copyrightOk = verifyCopyrightBytes(exe, `Copyright © 2026 ${EXPECTED}`);

@@ -35,10 +35,12 @@ fn test_params() -> Option<ConnectParams> {
     let fingerprint = env_or("LSHELL_TEST_FINGERPRINT", "");
 
     // 已知主机密钥：把指纹登记进去，连接时才会被放行
+    // 算法名与 russh 的 Debug 输出一致（Ed25519 / Rsa），可用 LSHELL_TEST_ALGO 覆盖
+    let algo = env_or("LSHELL_TEST_ALGO", "Ed25519");
     let known_hosts = if fingerprint.is_empty() {
         Vec::new()
     } else {
-        vec![(host.clone(), port as i64, "ssh-ed25519".to_string(), fingerprint)]
+        vec![(host.clone(), port as i64, algo, fingerprint)]
     };
 
     Some(ConnectParams {
@@ -47,6 +49,10 @@ fn test_params() -> Option<ConnectParams> {
         username: user,
         password: Some(pass),
         private_key: None,
+        use_agent: false,
+        keyboard_interactive: false,
+        proxy: None,
+        jump: None,
         known_hosts,
         keepalive: None,
         timeout: None,
@@ -60,6 +66,14 @@ async fn connect_session() -> Option<ssh::SshSession> {
         Ok(ssh::ConnectResult::Connected(s)) => Some(s),
         Ok(ssh::ConnectResult::NeedsHostKeyTrust { fingerprint, algo }) => {
             eprintln!("跳过：需要先信任主机密钥 {fingerprint} ({algo})");
+            None
+        }
+        Ok(ssh::ConnectResult::HostKeyChanged {
+            fingerprint,
+            stored_fingerprint,
+            ..
+        }) => {
+            eprintln!("跳过：主机密钥已变更（{stored_fingerprint} → {fingerprint}），需先确认更新");
             None
         }
         Err(e) => {
@@ -120,6 +134,13 @@ async fn test_password_auth_and_host_key() {
         Ok(ssh::ConnectResult::NeedsHostKeyTrust { fingerprint, algo }) => {
             // 未登记指纹时应要求用户确认，而不是直接放行
             println!("✓ 首次连接按预期要求确认: {fingerprint} ({algo})");
+        }
+        Ok(ssh::ConnectResult::HostKeyChanged {
+            fingerprint,
+            stored_fingerprint,
+            ..
+        }) => {
+            println!("✓ 指纹变更按预期要求确认更新: {stored_fingerprint} → {fingerprint}");
         }
         Err(e) => {
             panic!("连接失败: {e}");
@@ -229,9 +250,9 @@ async fn test_port_forwarding() {
     drop(channel);
 }
 
-/// 测试 7：主机密钥指纹不匹配时必须硬阻断
+/// 测试 7：主机密钥指纹不匹配时必须阻断，并给出可确认更新的结果
 ///
-/// 用一个故意错误的指纹，验证连接被拒绝而不是被放行。
+/// 用一个故意错误的指纹，验证连接被拒绝、且返回的是「待确认更新」而非放行。
 #[tokio::test]
 async fn test_host_key_mismatch_is_blocked() {
     let Some(mut params) = test_params() else {
@@ -239,32 +260,31 @@ async fn test_host_key_mismatch_is_blocked() {
         return;
     };
 
-    // 伪造一个错误的已登记指纹
-    params.known_hosts = vec![(
-        params.host.clone(),
-        params.port as i64,
-        "ssh-ed25519".to_string(),
-        "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
-    )];
+    // 算法必须与连接时协商的一致，否则会走「该算法首次见到」分支，测不到变更逻辑
+    let algo = env_or("LSHELL_TEST_ALGO", "Ed25519");
+    let forged = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string();
+    params.known_hosts = vec![(params.host.clone(), params.port as i64, algo, forged.clone())];
 
     match ssh::connect(params).await {
         Ok(ssh::ConnectResult::Connected(_)) => {
             panic!("指纹不匹配时不应连接成功")
         }
         // 首次见到（指纹未登记）不是安全事件，交由用户确认
-        Ok(ssh::ConnectResult::NeedsHostKeyTrust { .. }) => {
-            panic!("伪造指纹不应导致「首次见到」，说明校验逻辑有误")
+        Ok(ssh::ConnectResult::NeedsHostKeyTrust { algo, .. }) => {
+            panic!("伪造指纹不应导致「首次见到」（协商算法 {algo}），说明校验逻辑有误")
         }
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("已变更"),
-                "应报「主机密钥已变更」，实际: {msg}"
-            );
-            // 硬阻断时不得泄露认证信息
-            assert!(!msg.contains("密码"), "错误信息不应包含凭据: {msg}");
-            println!("✓ 指纹不匹配被正确阻断: {msg}");
+        Ok(ssh::ConnectResult::HostKeyChanged {
+            fingerprint,
+            stored_fingerprint,
+            ..
+        }) => {
+            assert_eq!(stored_fingerprint, forged, "应带回记录的指纹");
+            assert_ne!(fingerprint, forged, "应带回本次连接看到的指纹");
+            // 待确认结果不得泄露认证信息
+            assert!(!fingerprint.contains("密码"), "结果不应包含凭据");
+            println!("✓ 指纹不匹配被正确阻断: {stored_fingerprint} → {fingerprint}");
         }
+        Err(e) => panic!("指纹变更应返回待确认结果而不是报错: {e}"),
     }
 }
 /// 测试 8：完整终端数据通道 —— 连接 → 开 shell → 写入 → 收到输出
@@ -283,6 +303,10 @@ async fn test_terminal_channel_roundtrip() {
             eprintln!("跳过：需要先信任主机密钥");
             return;
         }
+        ssh::ConnectResult::HostKeyChanged { .. } => {
+            eprintln!("跳过：主机密钥已变更，需先确认更新");
+            return;
+        }
     };
 
     // 建立一个模拟前端的接收端
@@ -291,9 +315,9 @@ async fn test_terminal_channel_roundtrip() {
         let _ = tx.send(frame);
     });
 
-    let attachment = lshell_lib::session::attach_terminal(&session, sink)
+    let attachment = lshell_lib::session::attach_terminal_with(&session, sink, None, "", "utf-8", "")
         .await
-        .expect("attach_terminal 失败");
+        .expect("attach_terminal_with 失败");
     let writer = attachment.writer;
 
     // 前端写入

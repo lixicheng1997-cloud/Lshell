@@ -5,14 +5,15 @@
 use rusqlite::{params, Connection};
 
 use crate::error::{AppError, Result};
-use crate::models::{CommandRecord, Forward, Group, Host, HostQuery, KnownHost, Tag};
+use crate::models::{CommandRecord, Forward, Group, Host, HostQuery, KnownHost, Snippet, Tag};
 
 /// schema 版本号，写入 `PRAGMA user_version`
 ///
 /// - 0：旧版 —— 主密码 + Argon2id 派生密钥
 /// - 1：主密钥由系统密钥保护层（Windows DPAPI）保管
 /// - 2：新增命令历史表
-const SCHEMA_VERSION: i64 = 2;
+/// - 3：主机增加代理/跳板与终端 profile 列；新增命令片段表
+const SCHEMA_VERSION: i64 = 3;
 
 /// 单台主机保留的命令历史条数上限
 ///
@@ -52,7 +53,16 @@ CREATE TABLE IF NOT EXISTS hosts (
   key_pass_id   INTEGER REFERENCES vault_secrets(id),
   sort_order    INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
-  last_used_at  INTEGER
+  last_used_at  INTEGER,
+  proxy_type    TEXT NOT NULL DEFAULT 'none',
+  proxy_host    TEXT NOT NULL DEFAULT '',
+  proxy_port    INTEGER NOT NULL DEFAULT 0,
+  proxy_username TEXT NOT NULL DEFAULT '',
+  proxy_password_id INTEGER REFERENCES vault_secrets(id),
+  jump_host_id  INTEGER REFERENCES hosts(id) ON DELETE SET NULL,
+  term          TEXT NOT NULL DEFAULT '',
+  encoding      TEXT NOT NULL DEFAULT 'utf-8',
+  startup_command TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS host_tags (
@@ -114,13 +124,56 @@ CREATE TABLE IF NOT EXISTS command_history (
   created_at INTEGER NOT NULL
 );
 
+-- 常用命令片段：全局共享，不绑定主机
+CREATE TABLE IF NOT EXISTS snippets (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL DEFAULT '',
+  command    TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_hosts_alias   ON hosts(alias);
 CREATE INDEX IF NOT EXISTS idx_hosts_address ON hosts(address);
 CREATE INDEX IF NOT EXISTS idx_hosts_group   ON hosts(group_id);
+CREATE INDEX IF NOT EXISTS idx_hosts_last_used ON hosts(last_used_at);
 CREATE INDEX IF NOT EXISTS idx_host_tags_tag ON host_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_known_hosts   ON known_hosts(host, port);
 CREATE INDEX IF NOT EXISTS idx_cmd_hist_host ON command_history(host_id, id DESC);
 "#;
+
+/// hosts 表的列顺序，与 [`host_from_row`] 的索引一一对应。
+///
+/// 集中成常量，避免列表查询与单条查询各自维护一份列清单后出现错位。
+const HOST_COLUMNS: &str = "id, alias, address, port, username, auth_type, group_id, note, \
+     key_path, sort_order, created_at, last_used_at, proxy_type, proxy_host, proxy_port, \
+     proxy_username, jump_host_id, term, encoding, startup_command";
+
+fn host_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
+    Ok(Host {
+        id: row.get(0)?,
+        alias: row.get(1)?,
+        address: row.get(2)?,
+        port: row.get(3)?,
+        username: row.get(4)?,
+        auth_type: row.get(5)?,
+        group_id: row.get(6)?,
+        note: row.get(7)?,
+        key_path: row.get(8)?,
+        sort_order: row.get(9)?,
+        created_at: row.get(10)?,
+        last_used_at: row.get(11)?,
+        tags: Vec::new(),
+        proxy_type: row.get(12)?,
+        proxy_host: row.get(13)?,
+        proxy_port: row.get(14)?,
+        proxy_username: row.get(15)?,
+        jump_host_id: row.get(16)?,
+        term: row.get(17)?,
+        encoding: row.get(18)?,
+        startup_command: row.get(19)?,
+    })
+}
 
 pub struct Db {
     conn: Connection,
@@ -163,6 +216,11 @@ impl Db {
     /// - v1 → v2：新增命令历史表。
     ///   表结构由 `SCHEMA` 里的 `CREATE TABLE IF NOT EXISTS` 建好，
     ///   这里只需把版本号推进。
+    /// - v2 → v3：主机增加代理/跳板与终端 profile 列；新增命令片段表。
+    ///
+    ///   SQLite 的 `ALTER TABLE ADD COLUMN` 不能重复执行，而新建库的
+    ///   `CREATE TABLE` 已经带上了这些列，因此逐列检查后再加 ——
+    ///   新旧库走同一条路径，不会出现「新库升级时列已存在」的错误。
     fn migrate(&self) -> Result<()> {
         let version: i64 = self
             .conn
@@ -182,6 +240,29 @@ impl Db {
             // command_history 表已在 SCHEMA 中建好，无需额外 DDL
         }
 
+        if version < 3 {
+            // snippets 表已在 SCHEMA 中建好，这里只补 hosts 的新列。
+            // 都是「有默认值的非空列」或「可空列」，旧行自动取默认值，
+            // 已存的主机与凭据不受影响。
+            const COLUMNS: &[(&str, &str)] = &[
+                ("proxy_type", "proxy_type TEXT NOT NULL DEFAULT 'none'"),
+                ("proxy_host", "proxy_host TEXT NOT NULL DEFAULT ''"),
+                ("proxy_port", "proxy_port INTEGER NOT NULL DEFAULT 0"),
+                ("proxy_username", "proxy_username TEXT NOT NULL DEFAULT ''"),
+                (
+                    "proxy_password_id",
+                    "proxy_password_id INTEGER REFERENCES vault_secrets(id)",
+                ),
+                ("jump_host_id", "jump_host_id INTEGER REFERENCES hosts(id) ON DELETE SET NULL"),
+                ("term", "term TEXT NOT NULL DEFAULT ''"),
+                ("encoding", "encoding TEXT NOT NULL DEFAULT 'utf-8'"),
+                ("startup_command", "startup_command TEXT NOT NULL DEFAULT ''"),
+            ];
+            for (name, ddl) in COLUMNS {
+                self.add_column_if_missing("hosts", name, ddl)?;
+            }
+        }
+
         if version != SCHEMA_VERSION {
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -190,18 +271,29 @@ impl Db {
         Ok(())
     }
 
+    /// 列不存在时才执行 `ALTER TABLE ... ADD COLUMN`
+    fn add_column_if_missing(&self, table: &str, column: &str, ddl: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let exists = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == column);
+        if !exists {
+            self.conn
+                .execute(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"), [])?;
+        }
+        Ok(())
+    }
+
     // ---------- 主机 ----------
 
     pub fn list_hosts(&self, query: &HostQuery) -> Result<Vec<Host>> {
-        let mut sql = String::from(
-            "SELECT h.id, h.alias, h.address, h.port, h.username, h.auth_type, h.group_id, \
-             h.note, h.key_path, h.sort_order, h.created_at, h.last_used_at \
-             FROM hosts h",
-        );
+        let mut sql = format!("SELECT {} FROM hosts", HOST_COLUMNS);
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(tag_id) = query.tag_id {
-            sql.push_str(" JOIN host_tags ht ON ht.host_id = h.id WHERE ht.tag_id = ?1");
+            sql.push_str(" JOIN host_tags ht ON ht.host_id = hosts.id WHERE ht.tag_id = ?1");
             args.push(Box::new(tag_id));
         }
 
@@ -210,7 +302,7 @@ impl Db {
             if !text.is_empty() {
                 let clause = if query.tag_id.is_some() { " AND" } else { " WHERE" };
                 sql.push_str(&format!(
-                    "{clause} (h.alias LIKE ?{} OR h.address LIKE ?{} OR h.username LIKE ?{})",
+                    "{clause} (hosts.alias LIKE ?{} OR hosts.address LIKE ?{} OR hosts.username LIKE ?{})",
                     args.len() + 1,
                     args.len() + 1,
                     args.len() + 1
@@ -220,28 +312,27 @@ impl Db {
             }
         }
 
-        sql.push_str(" ORDER BY h.sort_order ASC, h.alias ASC");
+        sql.push_str(" ORDER BY sort_order ASC, alias ASC");
 
         let mut stmt = self.conn.prepare(&sql)?;
         let params_ref: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(params_ref.as_slice(), |row| {
-            Ok(Host {
-                id: row.get(0)?,
-                alias: row.get(1)?,
-                address: row.get(2)?,
-                port: row.get(3)?,
-                username: row.get(4)?,
-                auth_type: row.get(5)?,
-                group_id: row.get(6)?,
-                note: row.get(7)?,
-                key_path: row.get(8)?,
-                sort_order: row.get(9)?,
-                created_at: row.get(10)?,
-                last_used_at: row.get(11)?,
-                tags: Vec::new(),
-            })
-        })?;
+        let rows = stmt.query_map(params_ref.as_slice(), host_from_row)?;
 
+        let mut hosts: Vec<Host> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for host in &mut hosts {
+            host.tags = self.tags_for_host(host.id)?;
+        }
+        Ok(hosts)
+    }
+
+    /// 最近连接的主机（按 `last_used_at` 倒序），供侧栏「最近连接」使用
+    pub fn list_recent_hosts(&self, limit: i64) -> Result<Vec<Host>> {
+        let sql = format!(
+            "SELECT {HOST_COLUMNS} FROM hosts WHERE last_used_at IS NOT NULL \
+             ORDER BY last_used_at DESC LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit], host_from_row)?;
         let mut hosts: Vec<Host> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         for host in &mut hosts {
             host.tags = self.tags_for_host(host.id)?;
@@ -254,27 +345,11 @@ impl Db {
     }
 
     fn host_by_id_raw(&self, id: i64) -> Result<Option<Host>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, alias, address, port, username, auth_type, group_id, note, key_path, \
-             sort_order, created_at, last_used_at FROM hosts WHERE id = ?1",
-        )?;
+        let sql = format!("SELECT {HOST_COLUMNS} FROM hosts WHERE id = ?1");
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
-            let mut host = Host {
-                id: row.get(0)?,
-                alias: row.get(1)?,
-                address: row.get(2)?,
-                port: row.get(3)?,
-                username: row.get(4)?,
-                auth_type: row.get(5)?,
-                group_id: row.get(6)?,
-                note: row.get(7)?,
-                key_path: row.get(8)?,
-                sort_order: row.get(9)?,
-                created_at: row.get(10)?,
-                last_used_at: row.get(11)?,
-                tags: Vec::new(),
-            };
+            let mut host = host_from_row(row)?;
             host.tags = self.tags_for_host(host.id)?;
             Ok(Some(host))
         } else {
@@ -282,12 +357,26 @@ impl Db {
         }
     }
 
-    pub fn insert_host(&self, host: &Host, password_id: Option<i64>, key_pass_id: Option<i64>) -> Result<i64> {
+    /// 插入新主机。
+    ///
+    /// 四个凭据引用由调用方给出：常规保存只写 password_id / key_pass_id
+    /// （以及代理密码 proxy_password_id），复制主机时连同 key_id 一起
+    /// 沿用原主机的引用（不落明文、不新建密文）。
+    pub fn insert_host(
+        &self,
+        host: &Host,
+        password_id: Option<i64>,
+        key_id: Option<i64>,
+        key_pass_id: Option<i64>,
+        proxy_password_id: Option<i64>,
+    ) -> Result<i64> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO hosts (alias, address, port, username, auth_type, group_id, note, \
-             password_id, key_id, key_path, key_pass_id, sort_order, created_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL,?9,?10,?11,?12)",
+             password_id, key_id, key_path, key_pass_id, sort_order, created_at, \
+             proxy_type, proxy_host, proxy_port, proxy_username, proxy_password_id, \
+             jump_host_id, term, encoding, startup_command) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
             params![
                 host.alias,
                 host.address,
@@ -297,10 +386,20 @@ impl Db {
                 host.group_id,
                 host.note,
                 password_id,
+                key_id,
                 host.key_path,
                 key_pass_id,
                 host.sort_order,
                 host.created_at,
+                host.proxy_type,
+                host.proxy_host,
+                host.proxy_port,
+                host.proxy_username,
+                proxy_password_id,
+                host.jump_host_id,
+                host.term,
+                host.encoding,
+                host.startup_command,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -314,10 +413,14 @@ impl Db {
         host: &Host,
         password_id: Option<i64>,
         key_pass_id: Option<i64>,
+        proxy_password_id: Option<i64>,
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE hosts SET alias=?2, address=?3, port=?4, username=?5, auth_type=?6, \
-             group_id=?7, note=?8, password_id=?9, key_path=?10, key_pass_id=?11 WHERE id=?1",
+             group_id=?7, note=?8, password_id=?9, key_path=?10, key_pass_id=?11, \
+             proxy_type=?12, proxy_host=?13, proxy_port=?14, proxy_username=?15, \
+             proxy_password_id=?16, jump_host_id=?17, term=?18, encoding=?19, startup_command=?20 \
+             WHERE id=?1",
             params![
                 id,
                 host.alias,
@@ -330,6 +433,15 @@ impl Db {
                 password_id,
                 host.key_path,
                 key_pass_id,
+                host.proxy_type,
+                host.proxy_host,
+                host.proxy_port,
+                host.proxy_username,
+                proxy_password_id,
+                host.jump_host_id,
+                host.term,
+                host.encoding,
+                host.startup_command,
             ],
         )?;
         Ok(())
@@ -447,6 +559,32 @@ impl Db {
         Ok(())
     }
 
+    /// 按给定顺序重写主机的分组归属与组内排序（拖拽用）
+    pub fn reorder_hosts(&self, group_id: Option<i64>, ids: &[i64]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE hosts SET group_id = ?2, sort_order = ?3 WHERE id = ?1",
+                params![id, group_id, i as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 按给定顺序重写分组排序（拖拽用）
+    pub fn reorder_groups(&self, ids: &[i64]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE groups SET sort_order = ?2 WHERE id = ?1",
+                params![id, i as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     // ---------- 保险库 ----------
 
     /// 读取被系统密钥保护层包装的主密钥
@@ -495,39 +633,28 @@ impl Db {
         }
     }
 
-    pub fn secret_ids_for_host(&self, host_id: i64) -> Result<(Option<i64>, Option<i64>, Option<i64>)> {
+    /// 主机的四个凭据引用：(password_id, key_id, key_pass_id, proxy_password_id)
+    pub fn secret_ids_for_host(
+        &self,
+        host_id: i64,
+    ) -> Result<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> {
         let mut stmt = self.conn.prepare(
-            "SELECT password_id, key_id, key_pass_id FROM hosts WHERE id = ?1",
+            "SELECT password_id, key_id, key_pass_id, proxy_password_id FROM hosts WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![host_id])?;
         if let Some(row) = rows.next()? {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         } else {
-            Ok((None, None, None))
+            Ok((None, None, None, None))
         }
     }
 
     // ---------- 已知主机 ----------
 
-    pub fn get_known_host(&self, host: &str, port: i64) -> Result<Option<KnownHost>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, host, port, algo, fingerprint, added_at FROM known_hosts \
-             WHERE host = ?1 AND port = ?2 ORDER BY id DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query(params![host, port])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(KnownHost {
-                id: row.get(0)?,
-                host: row.get(1)?,
-                port: row.get(2)?,
-                algo: row.get(3)?,
-                fingerprint: row.get(4)?,
-                added_at: row.get(5)?,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
+    // 注意：不要提供「只按 host+port 取一条」的查询。
+    // 一台服务器可能同时持有多种算法的主机密钥，必须带 algo 一起匹配，
+    // 否则会把「换了协商算法」误判成「密钥被替换」。
+    // 相关查询见 list_known_hosts / insert_known_host / remove_known_host。
 
     pub fn insert_known_host(&self, host: &str, port: i64, algo: &str, fingerprint: &str) -> Result<()> {
         self.conn.execute(
@@ -718,6 +845,66 @@ impl Db {
         Ok(affected)
     }
 
+    /// 只更新跳板机引用（导入时做第二遍解析用，避免重写整行）
+    pub fn set_host_jump(&self, host_id: i64, jump_host_id: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE hosts SET jump_host_id = ?2 WHERE id = ?1",
+            params![host_id, jump_host_id],
+        )?;
+        Ok(())
+    }
+
+    // ---------- 常用命令片段 ----------
+
+    pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, command, sort_order, created_at FROM snippets \
+             ORDER BY sort_order ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Snippet {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                command: row.get(2)?,
+                sort_order: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 新增或更新片段；`id` 为 None 时新建。
+    pub fn upsert_snippet(&self, id: Option<i64>, name: &str, command: &str) -> Result<i64> {
+        match id {
+            Some(existing) => {
+                self.conn.execute(
+                    "UPDATE snippets SET name = ?2, command = ?3 WHERE id = ?1",
+                    params![existing, name, command],
+                )?;
+                Ok(existing)
+            }
+            None => {
+                let next: i64 = self
+                    .conn
+                    .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM snippets", [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap_or(0);
+                self.conn.execute(
+                    "INSERT INTO snippets (name, command, sort_order, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![name, command, next, now_secs()],
+                )?;
+                Ok(self.conn.last_insert_rowid())
+            }
+        }
+    }
+
+    pub fn delete_snippet(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM snippets WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     // ---------- 设置 ----------
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
@@ -737,6 +924,27 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// 读取全部设置，供前端启动时一次性加载
+    pub fn list_settings(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut stmt = self.conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (key, value) = row?;
+            out.insert(key, value);
+        }
+        Ok(out)
+    }
+
+    /// 删除某项设置（恢复默认时使用）
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
 }
 
 pub fn now_secs() -> i64 {
@@ -750,13 +958,12 @@ pub fn now_secs() -> i64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn host_crud_roundtrip() {
-        let db = Db::open_in_memory().unwrap();
-        let host = Host {
+    /// 测试用主机骨架：新列取默认值，各用例只覆盖自己关心的字段
+    fn blank_host(alias: &str, address: &str) -> Host {
+        Host {
             id: 0,
-            alias: "web-01".into(),
-            address: "10.0.0.5".into(),
+            alias: alias.into(),
+            address: address.into(),
             port: 22,
             username: "root".into(),
             auth_type: "password".into(),
@@ -767,11 +974,61 @@ mod tests {
             created_at: now_secs(),
             last_used_at: None,
             tags: vec![],
-        };
-        let id = db.insert_host(&host, None, None).unwrap();
+            proxy_type: "none".into(),
+            proxy_host: String::new(),
+            proxy_port: 0,
+            proxy_username: String::new(),
+            jump_host_id: None,
+            term: String::new(),
+            encoding: "utf-8".into(),
+            startup_command: String::new(),
+        }
+    }
+
+    #[test]
+    fn host_crud_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let host = blank_host("web-01", "10.0.0.5");
+        let id = db.insert_host(&host, None, None, None, None).unwrap();
         let fetched = db.get_host(id).unwrap().unwrap();
         assert_eq!(fetched.alias, "web-01");
         assert_eq!(fetched.address, "10.0.0.5");
+    }
+
+    #[test]
+    fn host_profile_and_proxy_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let mut host = blank_host("legacy", "10.0.0.6");
+        host.proxy_type = "socks5".into();
+        host.proxy_host = "127.0.0.1".into();
+        host.proxy_port = 1080;
+        host.encoding = "gbk".into();
+        host.term = "xterm".into();
+        host.startup_command = "cd /opt".into();
+        let id = db.insert_host(&host, None, None, None, None).unwrap();
+        let fetched = db.get_host(id).unwrap().unwrap();
+        assert_eq!(fetched.proxy_type, "socks5");
+        assert_eq!(fetched.proxy_port, 1080);
+        assert_eq!(fetched.encoding, "gbk");
+        assert_eq!(fetched.term, "xterm");
+        assert_eq!(fetched.startup_command, "cd /opt");
+    }
+
+    #[test]
+    fn recent_hosts_ordered_by_last_used() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db.insert_host(&blank_host("a", "10.0.0.1"), None, None, None, None).unwrap();
+        let b = db.insert_host(&blank_host("b", "10.0.0.2"), None, None, None, None).unwrap();
+        // 时间戳精度是秒，直接写入固定值避免同一秒内顺序不确定
+        db.conn
+            .execute("UPDATE hosts SET last_used_at = 100 WHERE id = ?1", params![b])
+            .unwrap();
+        db.conn
+            .execute("UPDATE hosts SET last_used_at = 200 WHERE id = ?1", params![a])
+            .unwrap();
+        let recent = db.list_recent_hosts(2).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].alias, "a");
     }
 
     #[test]
@@ -779,22 +1036,8 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let tag = db.upsert_tag("prod", "#378ADD").unwrap();
         for (alias, addr) in [("web-01", "10.0.0.1"), ("db-01", "10.0.0.2")] {
-            let host = Host {
-                id: 0,
-                alias: alias.into(),
-                address: addr.into(),
-                port: 22,
-                username: "root".into(),
-                auth_type: "password".into(),
-                group_id: None,
-                note: String::new(),
-                key_path: None,
-                sort_order: 0,
-                created_at: now_secs(),
-                last_used_at: None,
-                tags: vec![],
-            };
-            db.insert_host(&host, None, None).unwrap();
+            let host = blank_host(alias, addr);
+            db.insert_host(&host, None, None, None, None).unwrap();
         }
         let all = db.list_hosts(&HostQuery::default()).unwrap();
         assert_eq!(all.len(), 2);
@@ -829,22 +1072,8 @@ mod tests {
 
     /// 建一台主机，返回其 id
     fn seed_host(db: &Db, alias: &str) -> i64 {
-        let host = Host {
-            id: 0,
-            alias: alias.into(),
-            address: "10.0.0.1".into(),
-            port: 22,
-            username: "root".into(),
-            auth_type: "password".into(),
-            group_id: None,
-            note: String::new(),
-            key_path: None,
-            sort_order: 0,
-            created_at: now_secs(),
-            last_used_at: None,
-            tags: vec![],
-        };
-        db.insert_host(&host, None, None).unwrap()
+        db.insert_host(&blank_host(alias, "10.0.0.1"), None, None, None, None)
+            .unwrap()
     }
 
     #[test]
