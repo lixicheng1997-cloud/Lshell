@@ -41,6 +41,15 @@ async fn main() -> anyhow::Result<()> {
         password: Some(pass.clone()),
         key_passphrase: None,
         tag_ids: vec![],
+        proxy_type: None,
+        proxy_host: None,
+        proxy_port: None,
+        proxy_username: None,
+        proxy_password: None,
+        jump_host_id: None,
+        term: None,
+        encoding: None,
+        startup_command: None,
     };
 
     // 已存在同名主机则更新，不重复插入
@@ -64,6 +73,14 @@ async fn main() -> anyhow::Result<()> {
         created_at: lshell_lib::db::now_secs(),
         last_used_at: None,
         tags: vec![],
+        proxy_type: "none".into(),
+        proxy_host: String::new(),
+        proxy_port: 0,
+        proxy_username: String::new(),
+        jump_host_id: None,
+        term: String::new(),
+        encoding: "utf-8".into(),
+        startup_command: String::new(),
     };
 
     let password_id = Some(lshell_lib::state::store_secret(
@@ -77,10 +94,12 @@ async fn main() -> anyhow::Result<()> {
         Some(h) => {
             state
                 .db()?
-                .update_host(h.id, &host_rec, password_id, None)?;
+                .update_host(h.id, &host_rec, password_id, None, None)?;
             h.id
         }
-        None => state.db()?.insert_host(&host_rec, password_id, None)?,
+        None => state
+            .db()?
+            .insert_host(&host_rec, password_id, None, None, None)?,
     };
     println!("✓ 已写入主机 id={id}: {alias} ({user}@{host}:{port})");
 
@@ -90,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     });
     state
         .db()?
-        .insert_known_host(&host, port, "ssh-ed25519", &fp)?;
+        .insert_known_host(&host, port, "Ed25519", &fp)?;
     println!("✓ 已登记主机密钥 {fp}");
 
     println!("\n数据目录: {}", data_dir.display());

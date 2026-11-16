@@ -35,6 +35,14 @@ export interface Host {
   createdAt: number;
   lastUsedAt: number | null;
   tags: Tag[];
+  proxyType: "none" | "http" | "socks5";
+  proxyHost: string;
+  proxyPort: number;
+  proxyUsername: string;
+  jumpHostId: number | null;
+  term: string;
+  encoding: string;
+  startupCommand: string;
 }
 
 export interface HostInput {
@@ -49,6 +57,52 @@ export interface HostInput {
   password?: string | null;
   keyPassphrase?: string | null;
   tagIds: number[];
+  proxyType?: "none" | "http" | "socks5" | null;
+  proxyHost?: string | null;
+  proxyPort?: number | null;
+  proxyUsername?: string | null;
+  proxyPassword?: string | null;
+  jumpHostId?: number | null;
+  term?: string | null;
+  encoding?: string | null;
+  startupCommand?: string | null;
+}
+
+export interface Snippet {
+  id: number;
+  name: string;
+  command: string;
+  sortOrder: number;
+  createdAt: number;
+}
+
+export interface ImportCandidate {
+  alias: string;
+  address: string;
+  port: number;
+  username: string;
+  keyPath: string | null;
+  jump: string | null;
+  note: string;
+}
+
+export interface ImportWarning {
+  line: number;
+  message: string;
+}
+
+export interface ImportPreview {
+  path: string;
+  /** sshConfig / json */
+  format: string;
+  candidates: ImportCandidate[];
+  warnings: ImportWarning[];
+  duplicates: number;
+}
+
+export interface ImportSummary {
+  imported: number;
+  skipped: number;
 }
 
 export interface Forward {

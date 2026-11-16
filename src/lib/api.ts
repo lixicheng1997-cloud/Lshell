@@ -7,7 +7,10 @@ import type {
   Group,
   Host,
   HostInput,
+  ImportPreview,
+  ImportSummary,
   KnownHost,
+  Snippet,
   Tag,
 } from "./types";
 
@@ -58,12 +61,32 @@ export function parseNotice(payload: Uint8Array): SessionNotice | null {
 /** 连接结果，与 Rust 侧 models::ConnectOutcome 对应 */
 export type ConnectOutcome =
   | { status: "connected" }
-  | { status: "needsHostKeyTrust"; fingerprint: string; algo: string };
+  | { status: "needsHostKeyTrust"; fingerprint: string; algo: string }
+  | {
+      status: "hostKeyChanged";
+      fingerprint: string;
+      algo: string;
+      storedFingerprint: string;
+    };
 
 export const api = {
   // 应用
   /** 应用元信息：名称、版本、作者、简介 */
   appInfo: () => invoke<AppInfo>("app_info"),
+  /** 显式退出（绕过「关闭到托盘」） */
+  exitApp: () => invoke<void>("exit_app"),
+  /** 托盘图标是否真的创建成功；失败时关闭窗口应该直接退出而不是隐藏 */
+  trayAvailable: () => invoke<boolean>("tray_available"),
+
+  // 自动更新
+  /** 更新功能是否开启（由后端 updater::FEATURE_ENABLED 统一控制） */
+  updateEnabled: () => invoke<boolean>("update_enabled"),
+  /** 查询更新；没有新版本时返回 null */
+  checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+  /** 下载并校验更新包，暂存待安装 */
+  downloadUpdate: () => invoke<void>("download_update"),
+  /** 安装已下载的更新；Windows 上会退出当前进程 */
+  applyUpdate: () => invoke<void>("apply_update"),
 
   // 主机
   listHosts: (search?: string) => invoke<Host[]>("list_hosts", { search: search ?? null }),
@@ -71,6 +94,19 @@ export const api = {
   saveHost: (input: HostInput, id?: number) =>
     invoke<number>("save_host", { input, id: id ?? null }),
   deleteHost: (id: number) => invoke<void>("delete_host", { id }),
+  duplicateHost: (id: number) => invoke<Host>("duplicate_host", { id }),
+  /** 最近连接（按最后使用时间倒序） */
+  listRecentHosts: (limit = 6) =>
+    invoke<Host[]>("list_recent_hosts", { limit }),
+  /** 导入预检：只解析不写库 */
+  previewHostImport: (path?: string | null) =>
+    invoke<ImportPreview>("preview_host_import", { path: path ?? null }),
+  /** 执行导入；同地址+端口+用户名的主机会被跳过 */
+  importHosts: (path?: string | null) =>
+    invoke<ImportSummary>("import_hosts", { path: path ?? null }),
+  /** 导出主机库（json / sshConfig），不含凭据 */
+  exportHosts: (path: string, format: "json" | "sshConfig") =>
+    invoke<number>("export_hosts", { path, format }),
 
   // 标签
   listTags: () => invoke<Tag[]>("list_tags"),
@@ -85,6 +121,11 @@ export const api = {
   renameGroup: (id: number, name: string) =>
     invoke<void>("rename_group", { id, name }),
   deleteGroup: (id: number) => invoke<void>("delete_group", { id }),
+  /** 拖拽：按新顺序写回组内主机（含移入该组） */
+  reorderHosts: (groupId: number | null, ids: number[]) =>
+    invoke<void>("reorder_hosts", { groupId, ids }),
+  /** 拖拽：按新顺序写回分组 */
+  reorderGroups: (ids: number[]) => invoke<void>("reorder_groups", { ids }),
 
   // 转发
   listForwards: (hostId: number) =>
@@ -103,6 +144,24 @@ export const api = {
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
   setSetting: (key: string, value: string) =>
     invoke<void>("set_setting", { key, value }),
+  /** 一次性读取全部设置（启动时用，避免逐键 IPC） */
+  getAllSettings: () => invoke<Record<string, string>>("get_all_settings"),
+  /** 删除某项设置，回到注册表默认值 */
+  deleteSetting: (key: string) => invoke<void>("delete_setting", { key }),
+
+  // 终端背景图
+  /** 把本地图片复制到应用数据目录，返回持久化路径 */
+  saveTerminalBackground: (sourcePath: string) =>
+    invoke<string>("save_terminal_background", { sourcePath }),
+  /** 删除应用数据目录下的背景图 */
+  deleteTerminalBackground: (path: string) =>
+    invoke<void>("delete_terminal_background", { path }),
+  /** 读取背景图并转成 data URL（CSP 只允许 data:） */
+  terminalBackgroundDataUrl: (path: string) =>
+    invoke<string>("terminal_background_data_url", { path }),
+  /** 背景图文件是否仍然存在 */
+  terminalBackgroundExists: (path: string) =>
+    invoke<boolean>("terminal_background_exists", { path }),
 
   // 命令历史
   /** 记录一条已执行的命令，返回记录 id */
@@ -122,6 +181,13 @@ export const api = {
   /** 清空命令历史；hostId 传 null 表示清空全部 */
   clearCommandHistory: (hostId: number | null) =>
     invoke<number>("clear_command_history", { hostId }),
+
+  // 常用命令片段
+  listSnippets: () => invoke<Snippet[]>("list_snippets"),
+  /** 新建或更新片段；id 传 null 表示新建 */
+  saveSnippet: (name: string, command: string, id?: number | null) =>
+    invoke<number>("save_snippet", { id: id ?? null, name, command }),
+  deleteSnippet: (id: number) => invoke<void>("delete_snippet", { id }),
 
   // SSH 会话
   connectHost: (
@@ -145,6 +211,18 @@ export const api = {
     invoke<void>("terminal_resize", { sessionId, cols, rows }),
   sessionState: (sessionId: string) =>
     invoke<string | null>("session_state", { sessionId }),
+  /** 会话累计流量（字节）；网速由前端按差值计算 */
+  sessionNetStats: (sessionId: string) =>
+    invoke<NetStats>("session_net_stats", { sessionId }),
+  /** 目标主机硬件指标（远端不支持时抛错） */
+  sessionHostMetrics: (sessionId: string) =>
+    invoke<HostMetrics>("session_host_metrics", { sessionId }),
+  /** 远端当前登录用户（exec whoami，取不到时抛错） */
+  sessionCurrentUser: (sessionId: string) =>
+    invoke<string>("session_current_user", { sessionId }),
+  /** 远端挂载卷占用（df -Pk，取不到时抛错） */
+  sessionDiskUsage: (sessionId: string) =>
+    invoke<MountUsage[]>("session_disk_usage", { sessionId }),
 
   // 目录跟踪：让远端 shell 在每次显示提示符前上报当前目录（OSC 7）
   enableCwdTracking: (sessionId: string) =>
@@ -196,6 +274,28 @@ export const api = {
   forwardList: (sessionId: string) =>
     invoke<ForwardRuntime[]>("forward_list", { sessionId }),
 };
+
+/** 可用的应用更新 */
+export interface UpdateInfo {
+  /** 新版本号 */
+  version: string;
+  /** 当前版本号 */
+  currentVersion: string;
+  /** 更新说明，可能为空 */
+  notes: string;
+  /** 发布日期，可能为空 */
+  date: string | null;
+  /** 安装包大小（字节）；服务端未提供时为空 */
+  size: number | null;
+}
+
+/** 更新包下载进度 */
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+  /** 0-100；服务端未返回总大小时为 null */
+  percent: number | null;
+}
 
 /** 远端目录项 */
 export interface RemoteEntry {
@@ -254,6 +354,37 @@ export interface TransferStatus {
   error?: string | null;
   /** 是否可以取消 */
   cancellable: boolean;
+}
+
+/** 会话累计流量（字节） */
+export interface NetStats {
+  rxBytes: number;
+  txBytes: number;
+}
+
+/** 目标主机硬件指标 */
+export interface HostMetrics {
+  hostname: string;
+  os: string;
+  cpuModel: string;
+  cores: number;
+  cpuPercent: number;
+  /** 1/5/15 分钟负载，空格分隔；取不到时为空串 */
+  load: string;
+  memTotalKb: number;
+  memUsedKb: number;
+  diskTotalKb: number;
+  diskUsedKb: number;
+  uptimeSecs: number;
+}
+
+/** 单个挂载卷占用 */
+export interface MountUsage {
+  mount: string;
+  /** 容量单位：1K 块 */
+  totalKb: number;
+  usedKb: number;
+  percent: number;
 }
 
 /** 提取可读的错误信息 */

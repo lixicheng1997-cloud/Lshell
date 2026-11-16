@@ -8,6 +8,7 @@
 //! 对交互式工具来说这个延迟完全无感，却避免了传输中途被打断导致的协议错乱。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -291,16 +292,24 @@ pub async fn run_upload(
     local_path: &str,
     remote_path: &str,
 ) -> Result<(), TransferError> {
-    let mut local = tokio::fs::File::open(local_path)
-        .await
-        .map_err(|e| TransferError::Failed(format!("打开本地文件失败: {e}")))?;
-
-    let total = local
-        .metadata()
+    let total = tokio::fs::metadata(local_path)
         .await
         .map(|m| m.len())
         .map_err(|e| TransferError::Failed(format!("读取本地文件属性失败: {e}")))?;
     task.set_total(total);
+    upload_file(sftp, task, local_path, remote_path).await
+}
+
+/// 上传单个文件：进度累加到调用方已设定的 total，不重复 set_total
+async fn upload_file(
+    sftp: &SftpSession,
+    task: &TransferTask,
+    local_path: &str,
+    remote_path: &str,
+) -> Result<(), TransferError> {
+    let mut local = tokio::fs::File::open(local_path)
+        .await
+        .map_err(|e| TransferError::Failed(format!("打开本地文件失败: {e}")))?;
 
     let part_path = format!("{remote_path}{PART_SUFFIX}");
     let mut remote = match sftp.create(&part_path).await {
@@ -357,14 +366,28 @@ pub async fn run_download(
     remote_path: &str,
     local_path: &str,
 ) -> Result<(), TransferError> {
+    // 远端可能不返回文件大小；此时 total = 0，前端按「不确定进度」显示
+    let total = match sftp.open(remote_path).await {
+        Ok(f) => f.metadata().await.ok().and_then(|m| m.size).unwrap_or(0),
+        Err(e) => {
+            return Err(TransferError::Failed(format!("打开远端文件失败: {e}")));
+        }
+    };
+    task.set_total(total);
+    download_file(sftp, task, remote_path, local_path).await
+}
+
+/// 下载单个文件：进度累加到调用方已设定的 total，不重复 set_total
+async fn download_file(
+    sftp: &SftpSession,
+    task: &TransferTask,
+    remote_path: &str,
+    local_path: &str,
+) -> Result<(), TransferError> {
     let mut remote = sftp
         .open(remote_path)
         .await
         .map_err(|e| TransferError::Failed(format!("打开远端文件失败: {e}")))?;
-
-    // 远端可能不返回文件大小；此时 total = 0，前端按「不确定进度」显示
-    let total = remote.metadata().await.ok().and_then(|m| m.size).unwrap_or(0);
-    task.set_total(total);
 
     let part_path = format!("{local_path}{PART_SUFFIX}");
     let mut local = match tokio::fs::File::create(&part_path).await {
@@ -417,6 +440,203 @@ pub async fn run_download(
     if let Err(e) = tokio::fs::rename(&part_path, local_path).await {
         let _ = tokio::fs::remove_file(&part_path).await;
         return Err(TransferError::Failed(format!("重命名临时文件失败: {e}")));
+    }
+    Ok(())
+}
+
+/// 上传单个文件或整个目录（目录递归创建远端目录）
+pub async fn run_upload_any(
+    sftp: &SftpSession,
+    task: &TransferTask,
+    local_path: &str,
+    remote_path: &str,
+) -> Result<(), TransferError> {
+    let is_dir = tokio::fs::metadata(local_path)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    if is_dir {
+        run_upload_dir(sftp, task, local_path, remote_path).await
+    } else {
+        run_upload(sftp, task, local_path, remote_path).await
+    }
+}
+
+/// 下载单个文件或整个目录（目录递归创建本地目录）
+pub async fn run_download_any(
+    sftp: &SftpSession,
+    task: &TransferTask,
+    remote_path: &str,
+    local_path: &str,
+) -> Result<(), TransferError> {
+    let is_dir = sftp
+        .metadata(remote_path)
+        .await
+        .ok()
+        .map(|m| m.file_type().is_dir())
+        .unwrap_or(false);
+    if is_dir {
+        run_download_dir(sftp, task, remote_path, local_path).await
+    } else {
+        run_download(sftp, task, remote_path, local_path).await
+    }
+}
+
+/// 本地待上传条目：目录只用于在远端建同名目录
+struct LocalEntry {
+    local: PathBuf,
+    rel: String,
+    size: u64,
+    is_dir: bool,
+}
+
+/// 递归枚举本地目录（相对路径统一用 `/` 分隔，方便拼远端路径）
+fn collect_local_tree(root: &Path) -> Result<Vec<LocalEntry>, TransferError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let read = std::fs::read_dir(&dir)
+            .map_err(|e| TransferError::Failed(format!("读取本地目录失败: {e}")))?;
+        for item in read {
+            let item =
+                item.map_err(|e| TransferError::Failed(format!("读取本地目录失败: {e}")))?;
+            let path = item.path();
+            let rel = path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            let ft = item
+                .file_type()
+                .map_err(|e| TransferError::Failed(format!("读取本地文件属性失败: {e}")))?;
+            if ft.is_dir() {
+                out.push(LocalEntry {
+                    local: path.clone(),
+                    rel,
+                    size: 0,
+                    is_dir: true,
+                });
+                stack.push(path);
+            } else {
+                let size = item.metadata().map(|m| m.len()).unwrap_or(0);
+                out.push(LocalEntry {
+                    local: path,
+                    rel,
+                    size,
+                    is_dir: false,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 拼远端路径：base 为空时直接用 rel
+fn remote_path_join(base: &str, rel: &str) -> String {
+    if base.is_empty() {
+        rel.to_string()
+    } else {
+        format!("{}/{}", base.trim_end_matches('/'), rel)
+    }
+}
+
+async fn run_upload_dir(
+    sftp: &SftpSession,
+    task: &TransferTask,
+    local_root: &str,
+    remote_root: &str,
+) -> Result<(), TransferError> {
+    let entries = collect_local_tree(Path::new(local_root))?;
+    // 总进度按所有文件大小累加，目录本身不计字节
+    let total: u64 = entries
+        .iter()
+        .filter(|e| !e.is_dir)
+        .map(|e| e.size)
+        .sum();
+    task.set_total(total);
+
+    let remote_root = remote_root.trim_end_matches('/').to_string();
+    // 已存在时 create_dir 会报错，忽略即可：目标是「确保存在」
+    let _ = sftp.create_dir(&remote_root).await;
+
+    for entry in entries.iter().filter(|e| e.is_dir) {
+        let _ = sftp
+            .create_dir(&remote_path_join(&remote_root, &entry.rel))
+            .await;
+    }
+
+    for entry in entries.iter().filter(|e| !e.is_dir) {
+        if task.is_cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        let remote = remote_path_join(&remote_root, &entry.rel);
+        let local = entry.local.to_string_lossy().to_string();
+        upload_file(sftp, task, &local, &remote).await?;
+    }
+    Ok(())
+}
+
+/// 递归枚举远端目录，返回 (远端路径, 相对路径, 大小) 与总字节数
+async fn collect_remote_tree(
+    sftp: &SftpSession,
+    root: &str,
+) -> Result<(Vec<(String, String, u64)>, u64), TransferError> {
+    let mut files = Vec::new();
+    let mut total = 0u64;
+    let mut stack = vec![(root.to_string(), String::new())];
+    while let Some((dir, rel_prefix)) = stack.pop() {
+        let read = sftp
+            .read_dir(&dir)
+            .await
+            .map_err(|e| TransferError::Failed(format!("读取远端目录失败: {e}")))?;
+        for entry in read {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let path = remote_path_join(&dir, &name);
+            let rel = if rel_prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel_prefix}/{name}")
+            };
+            let meta = entry.metadata();
+            if meta.file_type().is_dir() {
+                stack.push((path, rel));
+            } else {
+                let size = meta.size.unwrap_or(0);
+                total += size;
+                files.push((path, rel, size));
+            }
+        }
+    }
+    Ok((files, total))
+}
+
+async fn run_download_dir(
+    sftp: &SftpSession,
+    task: &TransferTask,
+    remote_root: &str,
+    local_root: &str,
+) -> Result<(), TransferError> {
+    // 先确保根目录存在：空目录下载时没有文件可供 create_dir_all
+    tokio::fs::create_dir_all(local_root)
+        .await
+        .map_err(|e| TransferError::Failed(format!("创建本地目录失败: {e}")))?;
+    let (files, total) = collect_remote_tree(sftp, remote_root).await?;
+    task.set_total(total);
+
+    for (remote, rel, _size) in files {
+        if task.is_cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        let local = Path::new(local_root).join(&rel);
+        if let Some(parent) = local.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| TransferError::Failed(format!("创建本地目录失败: {e}")))?;
+        }
+        let local = local.to_string_lossy().to_string();
+        download_file(sftp, task, &remote, &local).await?;
     }
     Ok(())
 }

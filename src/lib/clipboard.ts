@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+
 /**
  * 剪贴板写入。
  *
@@ -61,6 +63,23 @@ export async function readText(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * 读取系统剪贴板文本（右键粘贴用）。
+ *
+ * WebView2 下 `navigator.clipboard.readText()` 常被权限拦住，
+ * 因此优先调用 Rust 侧的 Win32 实现；命令不可用时再退回 `readText()`。
+ * 返回空串表示剪贴板没有文本，调用方不应产生任何输入。
+ */
+export async function readClipboardText(): Promise<string> {
+  try {
+    const text = await invoke<string | null>("read_clipboard_text");
+    if (typeof text === "string") return text;
+  } catch {
+    // 非 Windows 或命令注册失败，继续走浏览器降级
+  }
+  return (await readText()) ?? "";
 }
 
 /**

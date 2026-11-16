@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
@@ -14,12 +14,56 @@ import {
   type SessionNotice,
 } from "../lib/api";
 import { CwdScanner } from "../lib/cwd";
+import {
+  DEFAULT_TERM_FONT_SIZE,
+  TERM_FONT_MAX,
+  TERM_FONT_MIN,
+} from "../lib/layout";
+import { getSettings, updateSetting, useSettings } from "../lib/settings";
 import { CommandCapture } from "../lib/command-capture";
-import { copyText, pasteText } from "../lib/clipboard";
-import { readTerminalTheme } from "../lib/terminal-theme";
+import { copyText, readClipboardText } from "../lib/clipboard";
+import { resolveTheme } from "../lib/app-themes";
 import { onThemeChange } from "../lib/theme";
 import TerminalSearch from "./TerminalSearch";
-import TerminalContextMenu, { type MenuItem } from "./TerminalContextMenu";
+
+/**
+ * 同时存活的 WebGL 渲染器上限。
+ *
+ * 浏览器对 WebGL 上下文有硬上限（通常 16 个），超出后会被强制丢弃，
+ * 表现为终端发黑。超过本上限的新终端退回 xterm 默认 DOM 渲染器，
+ * 功能不受影响，只是大流量输出时略慢。
+ */
+const MAX_WEBGL_CONTEXTS = 4;
+let webglCount = 0;
+
+/**
+ * 终端配色。
+ *
+ * 终端表面与侧栏 / 状态栏同属一块「面板材质」，所以底色统一取应用色板的
+ * bgPanel，而不是各配色自带的 terminal background（那个通常更暗/更纯，会
+ * 让终端区域看起来比周围面板深一档）。ANSI 前景色仍用配色自身定义，
+ * 可读性由前景色决定。
+ * 有背景图时画布透明，由 .term-host 的半透明面板底色透出背景。
+ */
+function buildTerminalTheme(themeId: string, hasBackground: boolean): ITheme {
+  const theme = resolveTheme(themeId);
+  return {
+    ...theme.terminal,
+    background: hasBackground ? "rgba(0,0,0,0)" : theme.app.bgPanel,
+  };
+}
+
+/**
+ * 给旧的自定义字体值补上等宽兜底。
+ *
+ * 内置选项本身已经带 Consolas / monospace 后备栈；
+ * 数据库里可能存着历史自定义值，字体缺失时不能让终端回落到比例字体。
+ */
+function terminalFontStack(value: string): string {
+  const lower = value.toLowerCase();
+  if (lower.includes("monospace") || lower.includes("consolas")) return value;
+  return `${value}, Consolas, monospace`;
+}
 
 interface Props {
   hostId: number;
@@ -39,12 +83,14 @@ interface Props {
   onWarn?: (message: string) => void;
   /** 会话状态变化（断线重连等），父组件可据此弹提示 */
   onNotice?: (notice: SessionNotice) => void;
-  /** 首次见到该主机，需要用户确认指纹 */
+  /** 首次见到该主机或指纹变更，需要用户确认 */
   onNeedsTrust?: (info: {
     fingerprint: string;
     algo: string;
     address: string;
     port: number;
+    /** 有值时表示指纹变更（旧记录），需要用户「确认更新」 */
+    storedFingerprint?: string;
   }) => void;
   /** 重新连接当前会话 */
   onReconnect?: () => void;
@@ -116,27 +162,35 @@ export default function TerminalView({
   const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
   const [searchMatch, setSearchMatch] = useState({ index: -1, count: 0 });
 
-  // ---------- 右键菜单 ----------
-  const [menu, setMenu] = useState<{
-    x: number;
-    y: number;
-    items: MenuItem[];
-  } | null>(null);
-
-  // 当前远端目录，供「在 SFTP 中打开」使用
+  // 当前远端目录，供文件面板定位
   const cwdRef = useRef<string | null>(null);
+
+  // 终端外观设置：字号、字体、光标、回滚均可在设置里调整
+  const settings = useSettings();
+  // 右键行为用 ref 读取，避免设置变化时重新绑定事件
+  const rightClickRef = useRef(settings.terminal.rightClick);
+  rightClickRef.current = settings.terminal.rightClick;
+
+  // 全局背景图由 AppBackground 负责渲染，终端只需要知道「要不要透明」
+  const hasBackgroundRef = useRef(settings.terminal.backgroundImage !== "");
+  hasBackgroundRef.current = settings.terminal.backgroundImage !== "";
 
   useEffect(() => {
     if (!hostRef.current) return;
 
     const term = new Terminal({
-      fontFamily:
-        '"Cascadia Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace',
-      fontSize: 13,
+      fontFamily: terminalFontStack(getSettings().terminal.fontFamily),
+      fontSize: getSettings().terminal.fontSize,
       lineHeight: 1.4,
-      cursorBlink: true,
-      scrollback: 10000,
-      theme: readTerminalTheme(),
+      cursorBlink: getSettings().terminal.cursorBlink,
+      cursorStyle: getSettings().terminal.cursorStyle,
+      scrollback: getSettings().terminal.scrollback,
+      // 有背景图时需要画布透明，背景图才能从底下透出来
+      allowTransparency: true,
+      theme: buildTerminalTheme(
+        getSettings().theme,
+        getSettings().terminal.backgroundImage !== ""
+      ),
       // 搜索高亮要用 registerDecoration / registerMarker，
       // 它们属于 xterm 的 proposed API，必须显式开启，否则调用即抛错。
       allowProposedApi: true,
@@ -150,13 +204,31 @@ export default function TerminalView({
     term.loadAddon(search);
     searchRef.current = search;
 
-    // WebGL 渲染器可显著提升大流量输出的性能
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
-    } catch {
-      // WebGL 不可用时回退到默认渲染器
+    // WebGL 渲染器可显著提升大流量输出的性能。
+    // 浏览器对同时存活的 WebGL 上下文有数量上限（通常 16 个），
+    // 超出后会被强制丢弃，表现为标签发黑。这里主动设上限，
+    // 超出的标签退回 xterm 默认的 DOM 渲染器。
+    let webgl: WebglAddon | null = null;
+    let webglReleased = false;
+    const releaseWebgl = () => {
+      if (!webgl || webglReleased) return;
+      webglReleased = true;
+      webglCount = Math.max(0, webglCount - 1);
+    };
+    if (webglCount < MAX_WEBGL_CONTEXTS) {
+      try {
+        const addon = new WebglAddon();
+        addon.onContextLoss(() => {
+          addon.dispose();
+          releaseWebgl();
+        });
+        term.loadAddon(addon);
+        webgl = addon;
+        webglCount += 1;
+      } catch {
+        // WebGL 不可用时回退到默认渲染器
+        webgl = null;
+      }
     }
 
     term.open(hostRef.current);
@@ -207,9 +279,14 @@ export default function TerminalView({
       onCwdChangeRef.current?.(p);
     });
 
-    // 主题切换时同步终端配色（xterm 支持运行时改 theme，无需重连）
-    const unsubscribeTheme = onThemeChange(() => {
-      term.options.theme = readTerminalTheme();
+    // 主题切换时同步终端配色（「跟随系统」的系统深浅色变化也走这里）
+    const unsubscribeTheme = onThemeChange((theme) => {
+      term.options.theme = {
+        ...theme.terminal,
+        background: hasBackgroundRef.current
+          ? "rgba(0,0,0,0)"
+          : theme.app.bgPanel,
+      };
     });
 
     // 命令捕获：从输入字节流里还原用户执行的命令
@@ -318,6 +395,19 @@ export default function TerminalView({
           return;
         }
 
+        if (outcome.status === "hostKeyChanged") {
+          // 指纹变更：同样交给用户确认，绝不静默替换记录
+          onStatusRef.current?.("failed", "主机密钥已变更，等待确认更新");
+          onNeedsTrustRef.current?.({
+            fingerprint: outcome.fingerprint,
+            algo: outcome.algo,
+            address,
+            port,
+            storedFingerprint: outcome.storedFingerprint,
+          });
+          return;
+        }
+
         onStatusRef.current?.("connected");
 
         // 目录跟踪：会话就绪后向远端注入上报脚本（幂等，重复调用无副作用）
@@ -359,94 +449,44 @@ export default function TerminalView({
     observer.observe(hostRef.current);
 
     /*
-     * 右键菜单：拦截终端区域的默认右键，弹出自定义菜单。
-     *
-     * 菜单项按当前状态动态生成 —— 有无选区、是否已连接，
-     * 决定了哪些操作可用。
+     * 右键直接粘贴：终端里「右键=粘贴」符合常见终端习惯，
+     * 即使有选中文本也保持粘贴（复制走 Ctrl+Shift+C）。
+     * 未连接时不做任何操作，剪贴板为空时不产生输入。
      */
     const onContextMenu = (e: MouseEvent) => {
       e.preventDefault();
-
-      const hasSelection = term.hasSelection();
-      const connected = term.options.disableStdin !== true;
-
-      const items: MenuItem[] = [
-        {
-          id: "copy",
-          label: "复制",
-          icon: "copy",
-          shortcut: "Ctrl+Shift+C",
-          disabled: !hasSelection,
-          onSelect: () => {
-            void copyText(term.getSelection());
-          },
-        },
-        {
-          id: "paste",
-          label: "粘贴",
-          icon: "clipboard",
-          shortcut: "Ctrl+V",
-          disabled: !connected,
-          onSelect: () => {
-            void pasteText((text) => {
-              // 用 paste 事件写进远端，与用户手动 Ctrl+V 一致
-              term.paste(text);
-            });
-          },
-        },
-        {
-          id: "selectAll",
-          label: "选择全部",
-          disabled: !connected,
-          onSelect: () => term.selectAll(),
-        },
-        {
-          id: "search",
-          label: "搜索终端输出",
-          icon: "search",
-          shortcut: "Ctrl+Shift+F",
-          onSelect: () => setSearchOpen(true),
-        },
-        {
-          id: "history",
-          label: "命令历史",
-          icon: "terminal",
-          onSelect: () => onOpenHistoryRef.current?.(),
-        },
-        {
-          id: "sftp",
-          label: "在文件面板打开当前目录",
-          icon: "folder",
-          disabled: !connected,
-          onSelect: () => onOpenSftpRef.current?.(cwdRef.current),
-        },
-        {
-          id: "reconnect",
-          label: "重新连接",
-          icon: "refresh",
-          onSelect: () => onReconnectRef.current?.(),
-        },
-        {
-          id: "disconnect",
-          label: "断开连接",
-          icon: "close",
-          danger: true,
-          disabled: !connected,
-          onSelect: () => onDisconnectRef.current?.(),
-        },
-        {
-          id: "clear",
-          label: "清屏",
-          icon: "trash",
-          shortcut: "Ctrl+L",
-          onSelect: () => term.clear(),
-        },
-      ];
-
-      setMenu({ x: e.clientX, y: e.clientY, items });
+      if (rightClickRef.current === "none") return;
+      if (term.options.disableStdin === true) return;
+      void readClipboardText().then((text) => {
+        if (text) term.paste(text);
+      });
     };
 
     hostRef.current.addEventListener("contextmenu", onContextMenu);
+
+    /*
+     * Ctrl+滚轮缩放字号：一格 1px，范围 8-32。
+     * 缩放后重新 fit 行列数，并把偏好持久化（所有终端共用一个字号）。
+     */
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      const cur = term.options.fontSize ?? DEFAULT_TERM_FONT_SIZE;
+      const next = Math.min(
+        TERM_FONT_MAX,
+        Math.max(TERM_FONT_MIN, cur + (e.deltaY < 0 ? 1 : -1))
+      );
+      if (next === cur) return;
+      term.options.fontSize = next;
+      try {
+        fit.fit();
+      } catch {
+        // 窗口尺寸过小时忽略
+      }
+      void updateSetting("terminal.fontSize", next);
+    };
+
+    hostRef.current.addEventListener("wheel", onWheel, { passive: false });
 
     return () => {
       disposed = true;
@@ -454,18 +494,56 @@ export default function TerminalView({
       observer.disconnect();
       window.removeEventListener("resize", onWindowResize);
       hostRef.current?.removeEventListener("contextmenu", onContextMenu);
+      hostRef.current?.removeEventListener("wheel", onWheel);
       inputDisposable.dispose();
       resizeDisposable.dispose();
       api.disconnectHost(sessionId).catch(() => {
         // 会话可能已断开
       });
       term.dispose();
+      releaseWebgl();
       termRef.current = null;
       fitRef.current = null;
       searchRef.current = null;
       delete (window as unknown as { __lshellTerm?: Terminal }).__lshellTerm;
     };
   }, [hostId, sessionId, address, port]);
+
+  // 外观/终端设置变化：直接改 xterm options，无需重连或重建终端
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const {
+      fontFamily,
+      fontSize,
+      cursorStyle,
+      cursorBlink,
+      scrollback,
+      backgroundImage,
+    } = settings.terminal;
+    term.options.fontFamily = terminalFontStack(fontFamily);
+    term.options.fontSize = fontSize;
+    term.options.cursorStyle = cursorStyle;
+    term.options.cursorBlink = cursorBlink;
+    term.options.scrollback = scrollback;
+    term.options.theme = buildTerminalTheme(
+      settings.theme,
+      backgroundImage !== ""
+    );
+    try {
+      fitRef.current?.fit();
+    } catch {
+      // 容器尺寸过小时忽略
+    }
+  }, [
+    settings.terminal.fontFamily,
+    settings.terminal.fontSize,
+    settings.terminal.cursorStyle,
+    settings.terminal.cursorBlink,
+    settings.terminal.scrollback,
+    settings.terminal.backgroundImage,
+    settings.theme,
+  ]);
 
   /** 执行一次搜索；direction 为 1 表示向下，-1 表示向上 */
   const runSearch = useCallback(
@@ -525,8 +603,15 @@ export default function TerminalView({
   }, [searchOpen]);
 
   return (
-    <div style={{ position: "absolute", inset: 0 }}>
-      <div ref={hostRef} style={{ position: "absolute", inset: 0 }} />
+    <div
+      className="terminal-pane"
+      style={{ position: "absolute", inset: 0, overflow: "hidden" }}
+    >
+      <div
+        ref={hostRef}
+        className="terminal-host"
+        style={{ position: "absolute", inset: 0 }}
+      />
 
       {searchOpen && (
         <TerminalSearch
@@ -542,14 +627,6 @@ export default function TerminalView({
         />
       )}
 
-      {menu && (
-        <TerminalContextMenu
-          x={menu.x}
-          y={menu.y}
-          items={menu.items}
-          onClose={() => setMenu(null)}
-        />
-      )}
     </div>
   );
 }

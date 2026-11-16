@@ -4,6 +4,7 @@
 //! 写半边用 `Arc` 共享给命令层（写入输入、调整尺寸）。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,12 +26,44 @@ pub enum SessionState {
     Reconnecting,
 }
 
+/// 会话流量计数器（字节）。
+///
+/// 只统计终端通道上的数据帧：rx 是远端输出，tx 是用户输入。
+/// 用原子计数，读取端（状态栏轮询）与会话读写路径互不阻塞。
+#[derive(Clone, Default)]
+pub struct NetCounters {
+    rx: Arc<AtomicU64>,
+    tx: Arc<AtomicU64>,
+}
+
+impl NetCounters {
+    pub fn add_rx(&self, n: u64) {
+        self.rx.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn add_tx(&self, n: u64) {
+        self.tx.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// (累计接收, 累计发送) 字节
+    pub fn snapshot(&self) -> (u64, u64) {
+        (
+            self.rx.load(Ordering::Relaxed),
+            self.tx.load(Ordering::Relaxed),
+        )
+    }
+}
+
 /// 一条活动会话
 pub struct ActiveSession {
     pub host_id: i64,
     pub alias: String,
+    /// 终端通道流量计数
+    pub net: NetCounters,
     /// 终端写半边：共享给命令层，用于写入输入与调整尺寸
     pub writer: Arc<WriteHalf>,
+    /// 上行输入编码器（GBK/Big5 时非透传）
+    pub encoder: crate::textcodec::Encoder,
     /// SFTP 会话：与终端复用同一条 SSH 连接。
     ///
     /// 用 `Arc` 包一层而不是直接持有，是为了让并发操作共享同一个会话 ——
@@ -98,6 +131,11 @@ impl SessionManager {
 
     pub fn writer(&self, id: &str) -> Option<Arc<WriteHalf>> {
         self.sessions.get(id).map(|s| Arc::clone(&s.writer))
+    }
+
+    /// 取出会话的流量计数器
+    pub fn net(&self, id: &str) -> Option<NetCounters> {
+        self.sessions.get(id).map(|s| s.net.clone())
     }
 
     /// 取出会话的底层 SSH 连接（转发用）
@@ -259,6 +297,20 @@ pub enum TerminalEnd {
 /// 集成测试也能直接注入接收端。传入的是已加帧头的字节。
 pub type OutputSink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 
+/// 输出聚合：连续数据在空闲这么久后立刻冲刷（单字符回显的额外延迟上限）
+const COALESCE_IDLE: Duration = Duration::from_millis(4);
+/// 输出聚合：持续输出时的最大攒批窗口
+const COALESCE_MAX_WAIT: Duration = Duration::from_millis(24);
+/// 输出聚合：攒到这么多字节就先发，避免单帧过大
+const COALESCE_MAX_BYTES: usize = 128 * 1024;
+
+/// 读取任务向聚合任务传递的事件（顺序即到达顺序）
+enum ReadEvent {
+    Data(Vec<u8>),
+    Exited(i32),
+    Lost(String),
+}
+
 /// 终端通道的挂载结果
 pub struct TerminalAttachment {
     /// 终端写半边：共享给命令层，用于写入输入与调整尺寸
@@ -271,58 +323,140 @@ pub struct TerminalAttachment {
 }
 
 /// 在已建立的连接上打开 shell 通道，并启动读取循环把远端输出推给前端。
-pub async fn attach_terminal(
-    session: &SshSession,
-    sink: OutputSink,
-) -> Result<TerminalAttachment> {
-    attach_terminal_with(session, sink, None).await
-}
-
-/// 与 [`attach_terminal`] 相同，但可传入「shell 已就绪」的通知器。
 ///
-/// 远端输出第一段数据（motd 或提示符）到达时触发一次，
-/// 供目录跟踪脚本在正确的时机注入。
+/// `term` 为远端 PTY 的 TERM 值（空则用 xterm-256color），
+/// `encoding` 为远端 locale 的字符集（GBK/Big5 时在 Rust 侧做双向转换），
+/// `startup_command` 会在登录后立即执行一次。
 pub async fn attach_terminal_with(
     session: &SshSession,
     sink: OutputSink,
     ready: Option<Arc<Notify>>,
+    term: &str,
+    encoding: &str,
+    startup_command: &str,
 ) -> Result<TerminalAttachment> {
+    let charset = crate::textcodec::Charset::from_label(encoding);
+    let term = if term.trim().is_empty() {
+        "xterm-256color"
+    } else {
+        term.trim()
+    };
+
     // 初始 PTY 尺寸，前端随后会发 Resize 纠正
-    let (mut read_half, write_half) =
-        ssh::open_shell(session, "xterm-256color", 80, 24).await?;
+    let (mut read_half, write_half) = ssh::open_shell(session, term, 80, 24).await?;
     log::info!("shell 通道已打开，准备启动读取循环");
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    // 启动命令：等价于登录后手敲一次；空则跳过
+    let startup = startup_command.trim();
+    if !startup.is_empty() {
+        let encoder = crate::textcodec::Encoder::new(charset);
+        let mut bytes = encoder.encode(startup.as_bytes());
+        bytes.push(b'\r');
+        ssh::write_terminal(&write_half, &bytes).await?;
+    }
 
-    // 读取循环：把远端输出推给前端
+    let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+    let mut decoder = crate::textcodec::Decoder::new(charset);
+    // 读取任务 → 聚合任务：按顺序传递数据与结束事件
+    let (data_tx, mut data_rx) = tokio::sync::mpsc::unbounded_channel::<ReadEvent>();
+
+    // 读取循环：只负责从 SSH 通道取数据，尽快交出去
     tokio::spawn(async move {
         let mut total = 0usize;
         let mut first = true;
         loop {
             match ssh::read_terminal(&mut read_half).await {
                 ssh::ReadStep::Data(data) => {
-                    if !data.is_empty() {
-                        total += data.len();
-                        log::debug!("收到远端数据 {} 字节（累计 {}）", data.len(), total);
-                        if first {
-                            first = false;
-                            if let Some(r) = &ready {
-                                r.notify_one();
-                            }
+                    let data = decoder.push(&data);
+                    if data.is_empty() {
+                        continue;
+                    }
+                    total += data.len();
+                    log::debug!("收到远端数据 {} 字节（累计 {}）", data.len(), total);
+                    if first {
+                        first = false;
+                        if let Some(r) = &ready {
+                            r.notify_one();
                         }
-                        sink(frame_data(data));
+                    }
+                    if data_tx.send(ReadEvent::Data(data)).is_err() {
+                        break;
                     }
                 }
                 ssh::ReadStep::Exited(code) => {
                     log::info!("远端 shell 正常退出，状态码 {code}，累计接收 {total} 字节");
-                    let msg = format!("\r\n[进程已退出，状态码 {code}]\r\n");
-                    sink(frame_data(msg.into_bytes()));
-                    let _ = tx.send(TerminalEnd::Exited(code));
+                    let _ = data_tx.send(ReadEvent::Exited(code));
                     break;
                 }
                 ssh::ReadStep::Lost(reason) => {
                     log::warn!("终端通道异常结束：{reason}，累计接收 {total} 字节");
-                    let _ = tx.send(TerminalEnd::Lost(reason));
+                    let _ = data_tx.send(ReadEvent::Lost(reason));
+                    break;
+                }
+            }
+        }
+    });
+
+    // 聚合任务：把连续到达的数据包合并成一次 IPC 帧。
+    //
+    // - 空闲 4ms 就冲刷：单字符回显、vim 局部刷新的延迟增加不超过一帧，感知不到；
+    // - 持续输出时最多攒 24ms 或 128KB 再发：`cat` 大文件时 IPC 次数下降一个量级；
+    // - 结束事件先冲刷残留数据再上报，避免帧序错乱。
+    tokio::spawn(async move {
+        let mut pending: Vec<u8> = Vec::new();
+        let mut max_deadline: Option<tokio::time::Instant> = None;
+
+        loop {
+            let event = if pending.is_empty() {
+                data_rx.recv().await
+            } else {
+                let now = tokio::time::Instant::now();
+                let deadline = max_deadline
+                    .unwrap_or(now + COALESCE_MAX_WAIT)
+                    .min(now + COALESCE_IDLE);
+                if pending.len() >= COALESCE_MAX_BYTES || now >= deadline {
+                    sink(frame_data(std::mem::take(&mut pending)));
+                    max_deadline = None;
+                    continue;
+                }
+                match tokio::time::timeout_at(deadline, data_rx.recv()).await {
+                    Ok(event) => event,
+                    Err(_) => {
+                        sink(frame_data(std::mem::take(&mut pending)));
+                        max_deadline = None;
+                        continue;
+                    }
+                }
+            };
+
+            match event {
+                // 读取任务结束（正常收尾）
+                None => {
+                    if !pending.is_empty() {
+                        sink(frame_data(std::mem::take(&mut pending)));
+                    }
+                    break;
+                }
+                Some(ReadEvent::Data(data)) => {
+                    if pending.is_empty() {
+                        max_deadline = Some(tokio::time::Instant::now() + COALESCE_MAX_WAIT);
+                    }
+                    pending.extend_from_slice(&data);
+                }
+                Some(ReadEvent::Exited(code)) => {
+                    if !pending.is_empty() {
+                        sink(frame_data(std::mem::take(&mut pending)));
+                    }
+                    let msg = format!("\r\n[进程已退出，状态码 {code}]\r\n");
+                    sink(frame_data(msg.into_bytes()));
+                    let _ = end_tx.send(TerminalEnd::Exited(code));
+                    break;
+                }
+                Some(ReadEvent::Lost(reason)) => {
+                    if !pending.is_empty() {
+                        sink(frame_data(std::mem::take(&mut pending)));
+                    }
+                    let _ = end_tx.send(TerminalEnd::Lost(reason));
                     break;
                 }
             }
@@ -331,7 +465,7 @@ pub async fn attach_terminal_with(
 
     Ok(TerminalAttachment {
         writer: Arc::new(write_half),
-        ended: rx,
+        ended: end_rx,
     })
 }
 
@@ -427,6 +561,20 @@ pub struct ReconnectSpec {
     pub port: u16,
     pub username: String,
     pub password: Option<String>,
+    /// 使用本机 SSH Agent 认证
+    pub use_agent: bool,
+    /// 密码失败后是否改用 keyboard-interactive
+    pub keyboard_interactive: bool,
+    /// 出站代理
+    pub proxy: Option<crate::proxy::ProxyConfig>,
+    /// 单跳跳板机（重连时重新建链）
+    pub jump: Option<Box<ReconnectSpec>>,
+    /// 远端 PTY 的 TERM 值，空表示默认
+    pub term: String,
+    /// 远端字符集（utf-8 / gbk / big5）
+    pub encoding: String,
+    /// 登录后自动执行的命令
+    pub startup_command: String,
     pub key_path: Option<String>,
     pub key_passphrase: Option<String>,
     pub known_hosts: Vec<ssh::KnownHostEntry>,
@@ -449,6 +597,13 @@ impl ReconnectSpec {
             username: self.username.clone(),
             password: self.password.clone(),
             private_key,
+            use_agent: self.use_agent,
+            keyboard_interactive: self.keyboard_interactive,
+            proxy: self.proxy.clone(),
+            jump: match &self.jump {
+                Some(jump) => Some(Box::new(jump.to_params()?)),
+                None => None,
+            },
             known_hosts: self.known_hosts.clone(),
             keepalive: self.keepalive,
             timeout: self.timeout,
@@ -473,6 +628,8 @@ pub struct SupervisorContext {
     pub spec: ReconnectSpec,
     /// 重连后要恢复的自动转发规则
     pub forwards: Vec<ForwardRule>,
+    /// 断线后是否自动重连（来自全局设置）
+    pub auto_reconnect: bool,
 }
 
 /// 启动会话守护任务。
@@ -528,6 +685,16 @@ async fn supervisor_loop(
             }
             TerminalEnd::Lost(reason) => {
                 log::warn!("会话 {} 连接断开：{reason}", ctx.session_id);
+                // 关闭自动重连时不再先展示“正在重连”，避免误导
+                if !ctx.auto_reconnect {
+                    set_state(&sessions, &ctx.session_id, SessionState::Failed).await;
+                    sink(frame_status(
+                        &SessionNotice::new(NoticeState::Disconnected)
+                            .with_message("连接已断开，自动重连已关闭"),
+                    ));
+                    sink(frame_closed());
+                    break;
+                }
                 set_state(&sessions, &ctx.session_id, SessionState::Reconnecting).await;
                 sink(frame_status(
                     &SessionNotice::new(NoticeState::Reconnecting)
@@ -595,6 +762,11 @@ async fn reconnect(
                 log::error!("重连中止：主机密钥未被信任");
                 return None;
             }
+            Ok(ssh::ConnectResult::HostKeyChanged { .. }) => {
+                // 指纹变更需要用户显式确认，自动重连不能替他做主
+                log::error!("重连中止：主机密钥已变更，需用户确认更新");
+                return None;
+            }
             Err(AppError::HostKey(msg)) => {
                 // 指纹变更：硬阻断，绝不静默接受
                 log::error!("重连被主机密钥校验阻断：{msg}");
@@ -612,6 +784,9 @@ async fn reconnect(
             &new_session,
             sink.clone(),
             Some(Arc::clone(&ready)),
+            &ctx.spec.term,
+            &ctx.spec.encoding,
+            &ctx.spec.startup_command,
         )
         .await
         {
@@ -931,6 +1106,13 @@ mod tests {
             port: 22,
             username: "root".into(),
             password: Some("secret".into()),
+            use_agent: false,
+            keyboard_interactive: true,
+            proxy: None,
+            jump: None,
+            term: String::new(),
+            encoding: String::new(),
+            startup_command: String::new(),
             key_path: None,
             key_passphrase: None,
             known_hosts: vec![],
@@ -952,6 +1134,13 @@ mod tests {
             port: 22,
             username: "root".into(),
             password: None,
+            use_agent: false,
+            keyboard_interactive: false,
+            proxy: None,
+            jump: None,
+            term: String::new(),
+            encoding: String::new(),
+            startup_command: String::new(),
             key_path: Some("Z:/不存在的私钥".into()),
             key_passphrase: None,
             known_hosts: vec![],
@@ -969,6 +1158,13 @@ mod tests {
             port: 22,
             username: "root".into(),
             password: None,
+            use_agent: false,
+            keyboard_interactive: false,
+            proxy: None,
+            jump: None,
+            term: String::new(),
+            encoding: String::new(),
+            startup_command: String::new(),
             key_path: None,
             key_passphrase: None,
             known_hosts: vec![],

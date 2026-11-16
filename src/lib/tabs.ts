@@ -13,13 +13,17 @@ export type TabStatus =
   | "connected"
   | "reconnecting"
   | "failed"
-  | "closed";
+  | "closed"
+  /** 上次退出时留下的标签，尚未被激活，不会自动建连 */
+  | "paused";
 
 export interface Tab {
   /** 唯一标识，同时作为 Rust 侧会话的 key */
   id: string;
   hostId: number;
   alias: string;
+  /** 主机配置里的登录用户名，仅作为未连接/取不到真实用户时的兜底展示 */
+  username: string;
   address: string;
   port: number;
   status: TabStatus;
@@ -29,13 +33,15 @@ export interface Tab {
 interface TabState {
   tabs: Tab[];
   activeId: string | null;
-  /** 首次见到某主机时的指纹确认 */
+  /** 首次见到或指纹变更时的确认 */
   trustPrompt: {
     tabId: string;
     fingerprint: string;
     algo: string;
     address: string;
     port: number;
+    /** 有值时表示指纹变更（旧记录），需要用户「确认更新」 */
+    storedFingerprint?: string;
   } | null;
 
   openTab: (host: Host) => void;
@@ -57,6 +63,8 @@ interface TabState {
   clearTrustPrompt: () => void;
   /** 信任主机密钥后重连：改变 tabId 强制组件重挂载 */
   reconnect: (tabId: string) => void;
+  /** 为同一主机再开一条独立会话（复制标签） */
+  duplicateTab: (tabId: string) => void;
 }
 
 let seq = 0;
@@ -70,6 +78,8 @@ const STORAGE_KEY = "lshell.open_tabs";
 interface PersistedTab {
   hostId: number;
   alias: string;
+  /** 旧版本的持久化数据没有该字段，读回时按空串兜底 */
+  username?: string;
   address: string;
   port: number;
 }
@@ -82,6 +92,7 @@ function persistTabs(state: TabState) {
       tabs: state.tabs.map<PersistedTab>((t) => ({
         hostId: t.hostId,
         alias: t.alias,
+        username: t.username,
         address: t.address,
         port: t.port,
       })),
@@ -105,9 +116,12 @@ function loadPersistedTabs(): { tabs: Tab[]; activeId: string | null } {
       id: nextId(),
       hostId: t.hostId,
       alias: t.alias,
+      username: t.username ?? "",
       address: t.address,
       port: t.port,
-      status: "connecting",
+      // 恢复的标签只保留「上次开着」的记忆，等用户切过去再建连，
+      // 避免启动瞬间并发握手
+      status: "paused",
     }));
     const activeId =
       tabs[data.activeIndex]?.id ?? tabs[tabs.length - 1]?.id ?? null;
@@ -148,6 +162,8 @@ export function statusText(status: TabStatus): string {
       return "重连中";
     case "failed":
       return "连接失败";
+    case "paused":
+      return "未连接";
     default:
       return "已断开";
   }
@@ -168,6 +184,7 @@ export const useTabs = create<TabState>((set) => ({
         id: nextId(),
         hostId: host.id,
         alias: host.alias,
+        username: host.username,
         address: host.address,
         port: host.port,
         status: "connecting",
@@ -238,6 +255,23 @@ export const useTabs = create<TabState>((set) => ({
         // 重连的就是当前标签时，跟随新 id，保持该终端仍处于选中状态
         activeId: state.activeId === tabId ? newId : state.activeId,
       };
+    }),
+
+  duplicateTab: (tabId) =>
+    set((state) => {
+      const src = state.tabs.find((t) => t.id === tabId);
+      if (!src) return state;
+      const tab: Tab = {
+        ...src,
+        id: nextId(),
+        status: "connecting",
+        error: undefined,
+      };
+      // 新会话插在原标签后面，切过去后位置更符合直觉
+      const index = state.tabs.findIndex((t) => t.id === tabId);
+      const tabs = [...state.tabs];
+      tabs.splice(index + 1, 0, tab);
+      return { tabs, activeId: tab.id };
     }),
 }));
 

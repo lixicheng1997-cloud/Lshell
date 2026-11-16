@@ -1,22 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "./lib/api";
+import type { UpdateInfo } from "./lib/api";
+import { requestUpdateCheck } from "./lib/update";
 import type { AppInfo, Group, Host, Tag } from "./lib/types";
 import { useTabs, statusDotClass } from "./lib/tabs";
 import { useShortcuts, type Shortcut } from "./lib/shortcuts";
-import { initTheme, setTheme, type ThemeMode } from "./lib/theme";
+import { initSettings, getSettings, updateSetting, useSettings } from "./lib/settings";
 import {
   DEFAULT_SFTP_WIDTH,
   DEFAULT_SIDEBAR_WIDTH,
   LAYOUT_KEYS,
-  readBool,
   SIDEBAR_MAX,
   SIDEBAR_MIN,
   SFTP_MAX,
   SFTP_MIN,
   useStoredNumber,
-  writeBool,
 } from "./lib/layout";
 import { notify, ToastHost } from "./lib/toast";
+import TooltipHost from "./components/Tooltip";
 import TitleBar from "./components/TitleBar";
 import TopBar from "./components/TopBar";
 import StatusBar from "./components/StatusBar";
@@ -28,9 +29,17 @@ import SftpPanel from "./components/SftpPanel";
 import ForwardPanel from "./components/ForwardPanel";
 import ShortcutHelp from "./components/ShortcutHelp";
 import AboutDialog from "./components/AboutDialog";
+import SettingsDialog from "./components/SettingsDialog";
+import UpdateDialog from "./components/UpdateDialog";
+import TrayHintDialog from "./components/TrayHintDialog";
 import CommandHistoryPanel from "./components/CommandHistoryPanel";
+import AppBackground from "./components/AppBackground";
 import Resizer from "./components/Resizer";
+import TerminalContextMenu from "./components/TerminalContextMenu";
 import Icon from "./components/Icon";
+
+/** 首次「关闭到托盘」提示只展示一次 */
+const TRAY_HINT_KEY = "lshell.trayHintShown";
 
 /** 把宽度限制在区间内 */
 function clamp(value: number, min: number, max: number): number {
@@ -40,6 +49,8 @@ function clamp(value: number, min: number, max: number): number {
 export default function App() {
   const [booting, setBooting] = useState(true);
   const [hosts, setHosts] = useState<Host[]>([]);
+  /** 最近连接：与搜索结果无关，用于侧栏顶部快捷入口 */
+  const [recentHosts, setRecentHosts] = useState<Host[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [search, setSearch] = useState("");
@@ -51,9 +62,15 @@ export default function App() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  /** 发现的新版本；非空时展示更新提示框 */
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  /** 首次关闭到托盘时的说明 */
+  const [trayHint, setTrayHint] = useState(false);
   const [sftpCollapsed, setSftpCollapsed] = useState(true);
-  const [theme, setThemeMode] = useState<ThemeMode>("dark");
   const [maximized, setMaximized] = useState(false);
+  /** 全局设置：主题、跟随目录等都由注册表统一提供 */
+  const settings = useSettings();
 
   /**
    * 应用元信息（版本、作者）。
@@ -63,7 +80,7 @@ export default function App() {
    */
   const [appInfo, setAppInfo] = useState<AppInfo>({
     name: "lshell",
-    version: "1.0.0",
+    version: "1.3.0",
     author: "xichengli",
     description: "Lshell - 轻量级 Windows SSH 客户端",
   });
@@ -103,7 +120,7 @@ export default function App() {
   }, [sftpWidth]);
 
   // 目录跟踪：开关 + 每个标签上报的当前目录
-  const [followCwd, setFollowCwd] = useState(true);
+  const followCwd = settings.followCwd;
   const [cwdMap, setCwdMap] = useState<Record<string, string>>({});
 
   /**
@@ -129,20 +146,44 @@ export default function App() {
     setTrustPrompt,
     clearTrustPrompt,
     reconnect,
+    duplicateTab,
   } = useTabs();
+
+  /** 标签右键菜单：位置（视口坐标）与目标标签 */
+  const [tabMenu, setTabMenu] = useState<{
+    x: number;
+    y: number;
+    tabId: string;
+    alias: string;
+  } | null>(null);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
 
+  /**
+   * 曾经被激活过的标签 id。
+   * 恢复的标签在首次切过去之前不挂载终端，因此也不会建立连接。
+   */
+  const [activated, setActivated] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    if (!activeId) return;
+    setActivated((prev) =>
+      prev.has(activeId) ? prev : new Set(prev).add(activeId)
+    );
+  }, [activeId]);
+
   const refresh = useCallback(async () => {
     try {
-      const [h, g, t] = await Promise.all([
+      const [h, g, t, r] = await Promise.all([
         api.listHosts(search),
         api.listGroups(),
         api.listTags(),
+        api.listRecentHosts(5),
       ]);
       setHosts(h);
       setGroups(g);
       setTags(t);
+      setRecentHosts(r);
     } catch (e) {
       notify.error(errorMessage(e));
     }
@@ -155,11 +196,8 @@ export default function App() {
       } catch (e) {
         notify.error(errorMessage(e));
       }
-      // 主题在首屏渲染前定好，避免闪一下浅色
-      const mode = await initTheme();
-      setThemeMode(mode);
-      // 目录跟踪开关同样在首屏前读出
-      setFollowCwd(await readBool(LAYOUT_KEYS.followCwd, true));
+      // 全局设置统一走注册表；首屏主题在初始化时已应用，避免闪一下浅色
+      await initSettings();
       // 版本号与作者：读不出来时保留兜底值，不阻断启动
       api
         .appInfo()
@@ -173,6 +211,12 @@ export default function App() {
     const timer = setTimeout(refresh, 150);
     return () => clearTimeout(timer);
   }, [search, refresh]);
+
+  // 有会话连上时刷新一次侧栏：后端会更新 last_used_at，「最近连接」随之变化
+  const connectedCount = tabs.filter((t) => t.status === "connected").length;
+  useEffect(() => {
+    if (connectedCount > 0) refresh();
+  }, [connectedCount, refresh]);
 
   const trustAndReconnect = async () => {
     const prompt = trustPrompt;
@@ -189,14 +233,6 @@ export default function App() {
     } catch (e) {
       notify.error(errorMessage(e));
     }
-  };
-
-  /** 主题三态循环：深色 → 浅色 → 跟随系统 */
-  const cycleTheme = () => {
-    const next: ThemeMode =
-      theme === "dark" ? "light" : theme === "light" ? "system" : "dark";
-    setThemeMode(next);
-    setTheme(next);
   };
 
   /** 终端上报当前目录 */
@@ -223,8 +259,7 @@ export default function App() {
   /** 开关「SFTP 跟随终端目录」 */
   const handleFollowChange = useCallback(
     (next: boolean) => {
-      setFollowCwd(next);
-      void writeBool(LAYOUT_KEYS.followCwd, next);
+      updateSetting("followCwd", next);
       if (!next) return;
       // 开启时给已建立的会话补装上报脚本（未连接的会话会在连上后自行安装）
       for (const tab of tabs) {
@@ -271,9 +306,178 @@ export default function App() {
     };
   }, []);
 
+  // ---------- 自动更新 ----------
+
+  /**
+   * 更新功能的开关只有后端一处（`updater::FEATURE_ENABLED`），
+   * 前端启动时读一次。默认 false：开关没读到之前不渲染任何更新入口，
+   * 也不会发更新请求。
+   */
+  const [updateEnabled, setUpdateEnabled] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .updateEnabled()
+      .then((enabled) => {
+        if (alive) setUpdateEnabled(enabled);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const checkForUpdate = useCallback(async (manual: boolean) => {
+    // 与设置页共用同一个检查入口：重复触发会复用同一个请求
+    const result = await requestUpdateCheck();
+    if (result.status === "available") {
+      setUpdateInfo(result.info);
+    } else if (manual && result.status === "uptodate") {
+      notify.info("当前已是最新版本");
+    } else if (manual && result.status === "error") {
+      // 静默检查失败（断网、更新源不可达）不打扰用户
+      notify.error(result.failure.title);
+    }
+  }, []);
+
+  // 启动 30 秒后静默检查一次，避开启动阶段的连接与渲染
+  useEffect(() => {
+    if (!updateEnabled) return;
+    const timer = setTimeout(() => checkForUpdate(false), 30_000);
+    return () => clearTimeout(timer);
+  }, [checkForUpdate, updateEnabled]);
+
+  // 托盘菜单「检查更新」（设置页的按钮直接读全局状态，不再走窗口事件）
+  useEffect(() => {
+    if (!updateEnabled) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen("update://check", () => checkForUpdate(true));
+      } catch {
+        // 浏览器预览环境没有事件 API
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [checkForUpdate, updateEnabled]);
+
+  // 自动转发起步失败：后端汇总后一次性通知，避免每条规则弹一次
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<{
+          sessionId: string;
+          failures: {
+            localPort: number;
+            remoteHost: string;
+            remotePort: number;
+            message: string;
+          }[];
+        }>("forward://auto-start-failed", (event) => {
+          const failures = event.payload.failures ?? [];
+          if (failures.length === 0) return;
+          const detail = failures
+            .map((f) => `${f.localPort} → ${f.remoteHost}:${f.remotePort}`)
+            .join("、");
+          notify.error(
+            `自动转发启动失败（${failures.length} 项）：${detail}。可在端口转发面板查看详情或更换本地端口。`
+          );
+        });
+      } catch {
+        // 浏览器预览环境没有事件 API
+      }
+    })();
+    return () => unlisten?.();
+  }, []);
+
+  // ---------- 关闭到托盘 ----------
+
+  /** 托盘是否可用；不可用时关闭窗口必须直接退出，否则窗口藏起来就再也找不回来 */
+  const [trayReady, setTrayReady] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .trayAvailable()
+      .then((ok) => {
+        if (alive) setTrayReady(ok);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        unlisten = await win.onCloseRequested(async (event) => {
+          // 不收起时直接放行，窗口正常关闭并退出
+          if (!getSettings().behavior.closeToTray) return;
+          // 托盘不可用时不隐藏，否则用户无法再唤回窗口
+          if (!trayReady) return;
+
+          event.preventDefault();
+          // 第一次给一次性说明，用户确认后再隐藏
+          if (localStorage.getItem(TRAY_HINT_KEY) !== "1") {
+            setTrayHint(true);
+            return;
+          }
+          try {
+            await win.hide();
+          } catch (e) {
+            // 隐藏失败（多半是权限问题）就真正退出，避免「点了关闭没反应」
+            notify.error(`收起到托盘失败，正在退出：${errorMessage(e)}`);
+            await api.exitApp().catch(() => {});
+          }
+        });
+      } catch {
+        // 浏览器预览环境没有窗口 API
+      }
+    })();
+    return () => unlisten?.();
+  }, [trayReady]);
+
+  const confirmTrayHint = async () => {
+    localStorage.setItem(TRAY_HINT_KEY, "1");
+    setTrayHint(false);
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().hide();
+    } catch (e) {
+      // 隐藏不了就退出，避免窗口停在原地让用户以为按钮失效
+      notify.error(`收起到托盘失败，正在退出：${errorMessage(e)}`);
+      await api.exitApp().catch(() => {});
+    }
+  };
+
+  /** 在当前标签列表里前后循环切换 */
+  const cycleTab = (dir: number) => {
+    if (tabs.length < 2) return;
+    const index = tabs.findIndex((t) => t.id === activeId);
+    const next = (Math.max(index, 0) + dir + tabs.length) % tabs.length;
+    setActive(tabs[next].id);
+  };
+
   // 全局快捷键
   const shortcuts = useMemo<Shortcut[]>(
     () => [
+      // 仅用于快捷键帮助展示、不参与全局注册的条目
+      {
+        combo: "ctrl+wheel",
+        description: "缩放终端",
+        hintOnly: true,
+        handler: () => {},
+      },
       {
         combo: "mod+k",
         description: "聚焦搜索框",
@@ -289,6 +493,11 @@ export default function App() {
           setNewHostGroup(null);
           setShowEditor(true);
         },
+      },
+      {
+        combo: "mod+,",
+        description: "打开设置",
+        handler: () => setShowSettings(true),
       },
       {
         combo: "mod+w",
@@ -312,28 +521,30 @@ export default function App() {
         description: "打开命令历史",
         handler: () => setShowHistory(true),
       },
-      {
-        combo: "mod+1",
-        description: "切换到第 1 个标签",
+      // 标签只保留前两个的快捷切换（Ctrl+1 / Ctrl+2）
+      ...Array.from({ length: 2 }, (_, i) => ({
+        combo: `mod+${i + 1}`,
+        description: `切换到第 ${i + 1} 个标签`,
         handler: () => {
-          const t = tabs[0];
+          const t = tabs[i];
           if (t) setActive(t.id);
         },
+      })),
+      {
+        combo: "mod+tab",
+        description: "切换到下一个标签",
+        handler: () => cycleTab(1),
       },
       {
-        combo: "mod+2",
-        description: "切换到第 2 个标签",
-        handler: () => {
-          const t = tabs[1];
-          if (t) setActive(t.id);
-        },
+        combo: "mod+shift+tab",
+        description: "切换到上一个标签",
+        handler: () => cycleTab(-1),
       },
       {
-        combo: "mod+3",
-        description: "切换到第 3 个标签",
+        combo: "mod+q",
+        description: "退出 Lshell（等同于托盘菜单的退出）",
         handler: () => {
-          const t = tabs[2];
-          if (t) setActive(t.id);
+          api.exitApp().catch(() => {});
         },
       },
     ],
@@ -349,8 +560,12 @@ export default function App() {
       if (action === "minimize") await win.minimize();
       else if (action === "toggle") await win.toggleMaximize();
       else await win.close();
-    } catch {
-      // 浏览器预览环境没有窗口 API
+    } catch (e) {
+      // 浏览器预览环境没有窗口 API，静默即可；其它情况要让用户看到原因，
+      // 避免再次出现「点了关闭没有任何反应」
+      if ("__TAURI_INTERNALS__" in window) {
+        notify.error(`窗口操作失败：${errorMessage(e)}`);
+      }
     }
   };
 
@@ -365,8 +580,13 @@ export default function App() {
     );
   }
 
+  // 铺背景图时，各面板切换成半透明表面，避免图片透出来影响阅读
+  const hasBackground = settings.terminal.backgroundImage !== "";
+
   return (
-    <div className="app">
+    <div className={`app ${hasBackground ? "with-bg" : ""}`}>
+      <AppBackground />
+
       <TitleBar
         maximized={maximized}
         version={appInfo.version}
@@ -378,18 +598,18 @@ export default function App() {
       <TopBar
         search={search}
         onSearch={setSearch}
-        theme={theme}
-        onCycleTheme={cycleTheme}
         onForward={() => setShowForward(true)}
         onShortcuts={() => setShowShortcuts(true)}
         onHistory={() => setShowHistory(true)}
         onAbout={() => setShowAbout(true)}
+        onSettings={() => setShowSettings(true)}
       />
 
       <div className="body" style={{ gridTemplateColumns: bodyColumns }}>
         <Sidebar
           hosts={hosts}
           groups={groups}
+          recentHosts={search.trim() ? [] : recentHosts}
           selectedId={activeTab?.hostId ?? null}
           onSelect={(id) => {
             const host = hosts.find((h) => h.id === id);
@@ -406,6 +626,7 @@ export default function App() {
             setShowEditor(true);
           }}
           onHostDeleted={(id) => closeTabsByHost(id)}
+          hostsFiltered={search.trim().length > 0}
           onError={notify.error}
         />
 
@@ -431,6 +652,15 @@ export default function App() {
                 key={tab.id}
                 className={`tab ${tab.id === activeId ? "active" : ""}`}
                 onClick={() => setActive(tab.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setTabMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    tabId: tab.id,
+                    alias: tab.alias,
+                  });
+                }}
                 title={`${tab.alias} — ${tab.address}:${tab.port}`}
               >
                 <span className={`sdot ${statusDotClass(tab.status)}`} />
@@ -461,13 +691,15 @@ export default function App() {
 
           <div className="term-host">
             {tabs.map((tab) => (
-              // 所有标签的终端都保持挂载，只切换显示。
-              // 这样切换标签不会断开连接，也不会丢失回滚历史。
+              // 已激活过的标签保持挂载，只切换显示，这样切换标签不会断开连接、
+              // 也不会丢失回滚历史。上次退出时留下的标签在首次激活前不挂载，
+              // 避免启动瞬间并发建立所有会话。
               <div
                 key={tab.id}
                 className="terminal-pane"
                 style={{ display: tab.id === activeId ? "block" : "none" }}
               >
+                {tab.id === activeId || activated.has(tab.id) ? (
                 <TerminalView
                   hostId={tab.hostId}
                   sessionId={tab.id}
@@ -502,6 +734,8 @@ export default function App() {
                   }}
                   onOpenHistory={() => setShowHistory(true)}
                   onCommand={(command, cwd) => {
+                    // 命令历史开关关闭后不再写入新记录
+                    if (!getSettings().history.enabled) return;
                     api
                       .recordCommand(tab.hostId, command, cwd ?? "")
                       .catch((e) => {
@@ -516,6 +750,15 @@ export default function App() {
                     setStatus(tab.id, "closed", "已断开连接");
                   }}
                 />
+                ) : (
+                  <div className="term-paused">
+                    <Icon name="terminal" size={22} />
+                    <span className="title">{tab.alias}</span>
+                    <span className="hint">
+                      未连接 · 切换到此标签时自动连接
+                    </span>
+                  </div>
+                )}
               </div>
             ))}
             {tabs.length === 0 && (
@@ -562,17 +805,47 @@ export default function App() {
 
       <StatusBar
         activeTab={activeTab}
+        cwd={activeTab ? (cwdMap[activeTab.id] ?? null) : null}
         hostCount={hosts.length}
         groupCount={groups.length}
         tagCount={tags.length}
         sessionCount={tabs.length}
       />
 
+      {tabMenu && (
+        <TerminalContextMenu
+          x={tabMenu.x}
+          y={tabMenu.y}
+          onClose={() => setTabMenu(null)}
+          items={[
+            {
+              id: "reconnect",
+              label: "重新连接",
+              icon: "refresh",
+              onSelect: () => reconnect(tabMenu.tabId),
+            },
+            {
+              id: "duplicate",
+              label: "复制会话",
+              icon: "copy",
+              onSelect: () => duplicateTab(tabMenu.tabId),
+            },
+            {
+              id: "close",
+              label: "关闭会话",
+              icon: "close",
+              onSelect: () => closeTab(tabMenu.tabId),
+            },
+          ]}
+        />
+      )}
+
       {showEditor && (
         <HostDialog
           host={editing}
           groups={groups}
           tags={tags}
+          hosts={hosts}
           defaultGroupId={newHostGroup}
           onClose={() => {
             setShowEditor(false);
@@ -595,12 +868,15 @@ export default function App() {
           algo={trustPrompt.algo}
           host={trustPrompt.address}
           port={trustPrompt.port}
+          storedFingerprint={trustPrompt.storedFingerprint}
           onCancel={() => {
             clearTrustPrompt();
             setStatus(
               trustPrompt.tabId,
               "failed",
-              "未信任主机密钥，已取消连接"
+              trustPrompt.storedFingerprint
+                ? "主机密钥已变更，未确认更新，已取消连接"
+                : "未信任主机密钥，已取消连接"
             );
           }}
           onTrust={trustAndReconnect}
@@ -610,6 +886,8 @@ export default function App() {
       {showForward && (
         <ForwardPanel
           sessionId={activeTab?.id ?? null}
+          hostId={activeTab?.hostId ?? null}
+          connected={activeTab?.status === "connected"}
           onClose={() => setShowForward(false)}
           onError={notify.error}
         />
@@ -625,6 +903,21 @@ export default function App() {
       {showAbout && (
         <AboutDialog info={appInfo} onClose={() => setShowAbout(false)} />
       )}
+
+      {showSettings && (
+        <SettingsDialog
+          onClose={() => setShowSettings(false)}
+          updateEnabled={updateEnabled}
+          // 保持在设置弹层之上打开更新弹层：关闭更新后还能回到检查结果
+          onShowUpdate={(info) => setUpdateInfo(info)}
+        />
+      )}
+
+      {updateEnabled && updateInfo && (
+        <UpdateDialog info={updateInfo} onClose={() => setUpdateInfo(null)} />
+      )}
+
+      {trayHint && <TrayHintDialog onConfirm={confirmTrayHint} />}
 
       {showHistory && (
         <CommandHistoryPanel
@@ -651,6 +944,7 @@ export default function App() {
       )}
 
       <ToastHost />
+      <TooltipHost />
     </div>
   );
 }
