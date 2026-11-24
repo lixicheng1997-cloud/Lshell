@@ -42,7 +42,7 @@ body {
 
 ::-webkit-scrollbar-thumb {
   background: var(--scroll-thumb);
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   border: 3px solid transparent;
   background-clip: content-box;
 }
@@ -105,7 +105,7 @@ body {
   background: var(--bg-panel-veil);
 }
 
-/* 终端与侧栏 / 标签栏 / 状态栏使用同一块面板材质 */
+/* 终端容器与其他面板使用同一套半透明材质 */
 .app.with-bg .term-host {
   background: var(--bg-panel-veil);
 }
@@ -144,7 +144,7 @@ body {
   color: var(--fg-faint);
   padding: 1px 6px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: var(--r-sm);
 }
 
 .titlebar .spacer {
@@ -172,6 +172,21 @@ body {
 .win-ctl button:hover {
   background: var(--bg-hover);
   color: var(--fg);
+}
+
+/*
+ * 背景插画满浓度时，窗口按钮可能压在插画的高亮元素上而看不清。
+ * 给按钮区垫一层淡底色，保证图标在任何主题下都可辨认。
+ */
+.app.with-bg .win-ctl button,
+.app.with-bg .topbar .btn.icon {
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--line-faint);
+}
+
+.app.with-bg .win-ctl button:hover,
+.app.with-bg .topbar .btn.icon:hover {
+  background: var(--bg-hover);
 }
 
 .win-ctl button.close:hover {
@@ -279,8 +294,20 @@ body {
               border-color var(--dur) var(--ease);
 }
 
+/* 带描边的次要按钮：用于「关闭」这类取消操作 */
+.btn.outline {
+  border-color: var(--line-strong);
+  background: var(--bg-surface);
+}
+
 .btn:hover:not(:disabled) {
   background: var(--bg-surface);
+  color: var(--fg);
+}
+
+.btn.outline:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent);
   color: var(--fg);
 }
 
@@ -387,7 +414,7 @@ body {
   border: 1px solid var(--line);
   border-bottom-width: 2px;
   padding: 1.5px 6px;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   white-space: nowrap;
 }
 
@@ -418,7 +445,7 @@ kbd.kbd {
   content: "";
   position: absolute;
   inset: 0 2px;
-  border-radius: 1px;
+  border-radius: var(--r-sm);
   background: transparent;
   transition: background var(--dur) var(--ease);
 }
@@ -453,8 +480,8 @@ body.resizing * {
 
 .side-head .label {
   font-size: var(--fs-label);
-  font-weight: 700;
-  letter-spacing: .12em;
+  font-weight: var(--fw-label);
+  letter-spacing: var(--ls-label);
   text-transform: uppercase;
   color: var(--fg-faint);
 }
@@ -478,8 +505,8 @@ body.resizing * {
 
 .recent-head .label {
   font-size: var(--fs-label);
-  font-weight: 700;
-  letter-spacing: .12em;
+  font-weight: var(--fw-label);
+  letter-spacing: var(--ls-label);
   text-transform: uppercase;
   color: var(--fg-faint);
 }
@@ -579,7 +606,7 @@ body.resizing * {
 .import-row .tag {
   flex: none;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   border: 1px solid var(--line);
   color: var(--fg-muted);
   font-size: 11px;
@@ -641,7 +668,7 @@ body.resizing * {
 .grp-head .sq {
   width: 6px;
   height: 6px;
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   flex: none;
   background: var(--accent);
   opacity: .85;
@@ -933,7 +960,7 @@ body.row-dragging * {
   height: 28px;
   padding: 0 9px 0 11px;
   max-width: 190px;
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   color: var(--fg-faint);
   font-size: var(--fs-list);
   white-space: nowrap;
@@ -966,7 +993,7 @@ body.row-dragging * {
 .tab .close {
   width: 16px;
   height: 16px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   display: grid;
   place-items: center;
   color: var(--fg-faint);
@@ -993,7 +1020,7 @@ body.row-dragging * {
 .tab-add {
   width: 26px;
   height: 26px;
-  border-radius: 7px;
+  border-radius: var(--r-md);
   display: grid;
   place-items: center;
   color: var(--fg-faint);
@@ -1074,7 +1101,7 @@ body.row-dragging * {
 .empty .glyph {
   width: 46px;
   height: 46px;
-  border-radius: 14px;
+  border-radius: var(--r-xl);
   display: grid;
   place-items: center;
   background: var(--bg-surface);
@@ -1157,7 +1184,7 @@ body.row-dragging * {
 .tr-bar {
   margin-top: 4px;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   background: var(--line);
   overflow: hidden;
 }
@@ -1201,7 +1228,7 @@ body.row-dragging * {
   min-width: 14px;
   height: 14px;
   padding: 0 3px;
-  border-radius: 7px;
+  border-radius: var(--r-md);
   background: var(--accent);
   color: var(--fg-on-accent);
   font-size: var(--fs-label);
@@ -1309,7 +1336,7 @@ body.row-dragging * {
   width: 26px;
   height: 15px;
   flex: none;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--bg-raised);
   border: 1px solid var(--line);
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
@@ -1410,9 +1437,9 @@ body.row-dragging * {
 /* 列头 */
 .sftp-cols {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 58px;
-  gap: var(--sp-2);
-  padding: 6px var(--sp-3);
+  grid-template-columns: 14px minmax(0, 1fr) 50px 78px 20px;
+  gap: 5px;
+  padding: 6px 8px;
   font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: .08em;
@@ -1422,7 +1449,8 @@ body.row-dragging * {
   border-bottom: 1px solid var(--line-faint);
 }
 
-.sftp-cols .size {
+.sftp-cols .size,
+.sftp-cols .time {
   text-align: right;
 }
 
@@ -1492,19 +1520,19 @@ body.row-dragging * {
 .f-row {
   position: relative;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) 58px;
-  gap: var(--sp-2);
+  grid-template-columns: 14px minmax(0, 1fr) 50px 78px 20px;
+  gap: 5px;
   align-items: center;
-  padding: 6px var(--sp-3);
+  padding: 6px 8px;
   border-left: 2px solid transparent;
   font-size: var(--fs-list);
   cursor: default;
   transition: background var(--dur) var(--ease);
 }
 
+/* 删除按钮占据独立的网格列，hover 时不再遮挡大小/时间 */
 .f-row .f-del {
-  position: absolute;
-  right: 6px;
+  justify-self: end;
   opacity: 0;
 }
 
@@ -1547,11 +1575,15 @@ body.row-dragging * {
   color: var(--fg);
 }
 
-.f-row .fsize {
+.f-row .fsize,
+.f-row .ftime {
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--fg-faint);
   text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sftp-empty {
@@ -1732,7 +1764,7 @@ body.row-dragging * {
   gap: 6px;
   height: 20px;
   padding: 0 9px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   font-size: var(--fs-aux);
   font-weight: 560;
   white-space: nowrap;
@@ -2040,7 +2072,7 @@ html[data-theme="light"] .tag-select-trigger {
   height: 22px;
   padding: 0 8px;
   border: 1px solid var(--line-faint);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--bg-surface);
   color: var(--fg);
   font-size: var(--fs-aux);
@@ -2352,7 +2384,7 @@ html[data-theme="light"] .tag-select-trigger {
 /* 运行状态标记：与按钮区分，弱化为一枚小胶囊 */
 .fwd-badge {
   padding: 1px 7px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--ok-dim);
   color: var(--ok);
   font-size: var(--fs-label);
@@ -2689,7 +2721,7 @@ html[data-theme="light"] .tag-select-trigger {
   padding: 0 var(--sp-3);
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--fg-muted);
   font-size: var(--fs-aux);
   cursor: pointer;
@@ -2763,7 +2795,7 @@ html[data-theme="light"] .tag-select-trigger {
   flex: none;
   padding: 1px 6px;
   background: var(--accent-dim);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   color: var(--accent);
 }
 
@@ -2900,34 +2932,56 @@ html[data-theme="light"] .tag-select-trigger {
   padding: var(--sp-4) var(--sp-5);
 }
 
-.settings-title {
-  margin: 0 0 var(--sp-4);
-  font-size: 15px;
-  font-weight: 660;
+
+
+/* 右侧内容按卡片分块，一块一个主题，不使用分割线 */
+.settings-card {
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
 }
 
-.settings-section {
-  display: flex;
-  flex-direction: column;
-  margin-bottom: var(--sp-5);
-}
-
-.settings-section h3 {
-  margin: 0 0 var(--sp-2);
+.settings-card-title {
+  margin: 0 0 var(--sp-3);
   font-size: var(--fs-label);
-  font-weight: 700;
-  letter-spacing: .12em;
+  font-weight: var(--fw-label);
+  letter-spacing: var(--ls-label);
   text-transform: uppercase;
   color: var(--fg-faint);
 }
 
+.settings-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
 .settings-row {
   display: grid;
-  grid-template-columns: 170px minmax(0, 1fr);
+  grid-template-columns: 150px minmax(0, 1fr);
   align-items: center;
-  gap: var(--sp-3);
-  padding: 9px 0;
-  border-bottom: 1px solid var(--line-strong);
+  gap: var(--sp-2) var(--sp-3);
+}
+
+/* 整行模式：标签独占一行，控件占满整行宽度 */
+.settings-row.block {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-2);
+}
+
+.settings-row.block .settings-desc {
+  grid-column: 1;
+}
+
+/* 标签与卡片标题重复时隐藏标签列 */
+.settings-row.nolabel {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-row.nolabel .settings-desc {
+  grid-column: 1;
 }
 
 .settings-row .label {
@@ -2948,7 +3002,15 @@ html[data-theme="light"] .tag-select-trigger {
 
 .settings-desc {
   grid-column: 2;
-  margin-top: -4px;
+  margin-top: -2px;
+  font-size: var(--fs-aux);
+  color: var(--fg-faint);
+  line-height: 1.5;
+}
+
+/* 独立成段的说明文字（不在 .settings-row 内），需要自己留出与分割线的间距 */
+.settings-hint {
+  margin-top: var(--sp-3);
   font-size: var(--fs-aux);
   color: var(--fg-faint);
   line-height: 1.5;
@@ -2969,14 +3031,20 @@ html[data-theme="light"] .tag-select-trigger {
 }
 
 .settings-note {
-  margin-bottom: var(--sp-3);
+  margin: 0 0 var(--sp-3);
   padding: var(--sp-2) var(--sp-3);
-  background: var(--bg-surface);
-  border: 1px solid var(--line-strong);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-faint);
   border-radius: var(--r-sm);
   font-size: var(--fs-aux);
   color: var(--fg-muted);
   line-height: 1.5;
+}
+
+/* 卡片内的提示文字跟随卡片底色，不再额外画框 */
+.settings-card .settings-note {
+  background: transparent;
+  border-color: var(--line-faint);
 }
 
 .settings-placeholder {
@@ -3203,7 +3271,7 @@ html[data-theme="light"] .tag-select-trigger {
 .font-badge {
   padding: 0 4px;
   border: 1px solid var(--line-strong);
-  border-radius: 3px;
+  border-radius: var(--r-sm);
   font-size: 10px;
   color: var(--fg-faint);
 }
@@ -3285,6 +3353,34 @@ html[data-theme="light"] .tag-select-trigger {
   background: var(--accent-dim);
 }
 
+/* 主题分组标题与插画标记 */
+.theme-group + .theme-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line-faint);
+}
+
+.theme-group-title {
+  padding: 4px 8px;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-label);
+  letter-spacing: var(--ls-label);
+  color: var(--fg-faint);
+}
+
+.theme-art-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+select.font-trigger {
+  appearance: none;
+  cursor: pointer;
+}
+
 .theme-option-name {
   flex: 1;
   min-width: 0;
@@ -3299,7 +3395,7 @@ html[data-theme="light"] .tag-select-trigger {
   flex: none;
   width: 56px;
   height: 20px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .18);
 }
@@ -3311,10 +3407,90 @@ html[data-theme="light"] .tag-select-trigger {
 .theme-badge {
   flex: none;
   padding: 0 5px;
+  margin-top: 1px;
   border: 1px solid var(--line-strong);
-  border-radius: 3px;
+  border-radius: var(--r-sm);
   font-size: 10px;
   color: var(--fg-faint);
+}
+
+/* 主题平铺卡片 */
+.theme-grid {
+  display: grid;
+  /* 列宽自适应：窗口宽时排 3 列以上，窄时自动减列，不出现横向溢出 */
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: var(--sp-2);
+  width: 100%;
+}
+
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur, 150ms) var(--ease, ease),
+    border-color var(--dur, 150ms) var(--ease, ease);
+}
+
+.theme-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--line-strong);
+}
+
+.theme-card.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.theme-card-preview {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 54px;
+  border-radius: var(--r-sm);
+  background-position: center;
+  background-size: cover;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .16);
+}
+
+.theme-card-swatches {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  left: 4px;
+  display: flex;
+  height: 8px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .35);
+}
+
+.theme-card-swatches span {
+  flex: 1;
+}
+
+.theme-card-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.theme-card-name {
+  flex: 1;
+  min-width: 0;
+  /* 名称可能较长，允许换行而不是截断成「…」 */
+  overflow-wrap: anywhere;
+  font-size: var(--fs-small, 12px);
+  line-height: 1.35;
 }
 
 /* 背景图 */
@@ -3339,10 +3515,6 @@ html[data-theme="light"] .tag-select-trigger {
 .settings-bg-empty {
   font-size: var(--fs-aux);
   color: var(--fg-faint);
-}
-
-.settings-bg-hint {
-  margin-bottom: var(--sp-3);
 }
 
 .settings-range {

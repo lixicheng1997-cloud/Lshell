@@ -5,7 +5,9 @@
 use rusqlite::{params, Connection};
 
 use crate::error::{AppError, Result};
-use crate::models::{CommandRecord, Forward, Group, Host, HostQuery, KnownHost, Snippet, Tag};
+use crate::models::{
+    CommandRecord, EditorAudit, Forward, Group, Host, HostQuery, KnownHost, Snippet, Tag,
+};
 
 /// schema 版本号，写入 `PRAGMA user_version`
 ///
@@ -123,6 +125,19 @@ CREATE TABLE IF NOT EXISTS command_history (
   cwd        TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
+
+-- 远程文件编辑审计：只记录路径、提权方式与结果，绝不记录文件内容或密码
+CREATE TABLE IF NOT EXISTS editor_audit (
+  id            INTEGER PRIMARY KEY,
+  host_id       INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+  remote_path   TEXT NOT NULL,
+  elevated_mode TEXT NOT NULL,
+  forced        INTEGER NOT NULL DEFAULT 0,
+  result        TEXT NOT NULL,
+  bytes         INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_editor_audit_host ON editor_audit(host_id, created_at DESC);
 
 -- 常用命令片段：全局共享，不绑定主机
 CREATE TABLE IF NOT EXISTS snippets (
@@ -790,6 +805,57 @@ impl Db {
     ///
     /// `host_id` 为 `None` 时返回全部主机的历史（跨主机搜索）。
     /// 结果按 id 倒序，即最近执行的在前。
+    /// 记录一条远程编辑审计。不写入文件内容、密码或命令行。
+    pub fn insert_editor_audit(
+        &self,
+        host_id: i64,
+        remote_path: &str,
+        elevated_mode: &str,
+        forced: bool,
+        result: &str,
+        bytes: i64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO editor_audit
+             (host_id, remote_path, elevated_mode, forced, result, bytes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                host_id,
+                remote_path,
+                elevated_mode,
+                forced as i32,
+                result,
+                bytes,
+                now_secs()
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 查询编辑审计；host_id 为 None 表示跨全部主机。
+    pub fn list_editor_audit(&self, host_id: Option<i64>, limit: i64) -> Result<Vec<EditorAudit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, host_id, remote_path, elevated_mode, forced, result, bytes, created_at
+             FROM editor_audit
+             WHERE ?1 IS NULL OR host_id = ?1
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![host_id, limit.clamp(1, 200)], |row| {
+            Ok(EditorAudit {
+                id: row.get(0)?,
+                host_id: row.get(1)?,
+                remote_path: row.get(2)?,
+                elevated_mode: row.get(3)?,
+                forced: row.get::<_, i32>(4)? != 0,
+                result: row.get(5)?,
+                bytes: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn list_commands(
         &self,
         host_id: Option<i64>,

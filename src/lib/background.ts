@@ -5,6 +5,8 @@
  * 这里做一个小容量缓存，避免切换标签 / 窗口重绘时反复走 IPC。
  */
 import { api } from "./api";
+import { resolveTheme, themeArtwork } from "./app-themes";
+import type { Settings } from "./settings";
 
 const MAX_CACHE = 3;
 const cache = new Map<string, string>();
@@ -25,4 +27,13 @@ export async function loadBackgroundDataUrl(path: string): Promise<string> {
   }
   cache.set(path, url);
   return url;
+}
+
+/** 是否真的铺了背景：用户自定义图，或主题自带插画且未被关闭 */
+export function hasEffectiveBackground(settings: Settings): boolean {
+  if (settings.terminal.backgroundImage !== "") return true;
+  return (
+    settings.appearance.artworkEnabled &&
+    !!themeArtwork(resolveTheme(settings.theme))
+  );
 }

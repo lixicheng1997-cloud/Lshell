@@ -6,6 +6,7 @@
 //! 连接状态由 Rust 侧持有，前端仅作视图。
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use russh::client::{self, Handle};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
@@ -790,6 +791,154 @@ pub async fn exec_capture(session: &SshSession, command: &str) -> Result<String>
     }
 
     Ok(out)
+}
+
+/// 一次 exec 的收集结果。
+#[derive(Debug, Default)]
+pub struct ExecOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_status: Option<u32>,
+}
+
+/// 等待通道消息时的结果。
+#[derive(Debug, PartialEq, Eq)]
+pub enum WaitResult {
+    /// 命中标记，携带 markers 中的下标
+    Marker(usize),
+    /// 远端进程退出，携带退出码
+    Exited(u32),
+    Eof,
+    Closed,
+    Timeout,
+}
+
+/// 带 stdin 的交互式 exec 通道。
+///
+/// 用于 sudo 提权保存：先写密码行，等待远端脚本打印 READY 标记，
+/// 确认密码已被接受后才推送文件内容。这样密码错误时内容零字节发出，
+/// 不会被 sudo 当成重试密码读走。
+///
+/// Spike S3 已确认：russh 0.65.0 的 `data_bytes(&self)` 与 `wait(&mut self)`
+/// 可以顺序调用，无需拆分读写半；分块写入由本结构处理。
+pub struct InteractiveExec {
+    channel: russh::Channel<russh::client::Msg>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_status: Option<u32>,
+}
+
+impl InteractiveExec {
+    /// 在已有连接上另开一条 exec 通道执行命令。
+    pub async fn start(session: &SshSession, command: &str) -> Result<Self> {
+        let channel = {
+            let handle = session.handle.lock().await;
+            handle
+                .channel_open_session()
+                .await
+                .map_err(|e| AppError::Connection(format!("无法打开 exec 通道: {e}")))?
+        };
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| AppError::Connection(format!("无法执行远端命令: {e}")))?;
+        Ok(Self {
+            channel,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_status: None,
+        })
+    }
+
+    /// 向 stdin 写入数据，按 16 KiB 分块避免单包过大。
+    pub async fn write_stdin(&self, data: &[u8]) -> Result<()> {
+        for chunk in data.chunks(16 * 1024) {
+            self.channel
+                .data_bytes(chunk.to_vec())
+                .await
+                .map_err(|e| AppError::Connection(format!("写入 stdin 失败: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// 等待任一标记出现在 stdout 或 stderr 中。
+    ///
+    /// 同时处理 ExitStatus / Eof / Close，避免远端提前退出时死等。
+    pub async fn wait_for_any(
+        &mut self,
+        markers: &[&[u8]],
+        timeout: Duration,
+    ) -> Result<WaitResult> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(WaitResult::Timeout);
+            }
+            let msg = match tokio::time::timeout(remaining, self.channel.wait()).await {
+                Ok(Some(msg)) => msg,
+                Ok(None) => return Ok(WaitResult::Closed),
+                Err(_) => return Ok(WaitResult::Timeout),
+            };
+            match msg {
+                russh::ChannelMsg::Data { data } => {
+                    self.stdout.extend_from_slice(&data);
+                    if let Some(i) = markers.iter().position(|m| self.stdout.ends_with(m)) {
+                        return Ok(WaitResult::Marker(i));
+                    }
+                }
+                russh::ChannelMsg::ExtendedData { data, ext } => {
+                    if ext == 1 {
+                        self.stderr.extend_from_slice(&data);
+                        if let Some(i) = markers.iter().position(|m| self.stderr.ends_with(m)) {
+                            return Ok(WaitResult::Marker(i));
+                        }
+                    }
+                }
+                russh::ChannelMsg::ExitStatus { exit_status } => {
+                    self.exit_status = Some(exit_status);
+                    return Ok(WaitResult::Exited(exit_status));
+                }
+                russh::ChannelMsg::Eof => return Ok(WaitResult::Eof),
+                russh::ChannelMsg::Close { .. } => return Ok(WaitResult::Closed),
+                _ => {}
+            }
+        }
+    }
+
+    /// 关闭 stdin 并收集到进程退出，返回全部输出。
+    pub async fn finish(mut self, timeout: Duration) -> Result<ExecOutput> {
+        let _ = self.channel.eof().await;
+        if self.exit_status.is_none() {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(remaining, self.channel.wait()).await {
+                    Ok(Some(russh::ChannelMsg::Data { data })) => self.stdout.extend_from_slice(&data),
+                    Ok(Some(russh::ChannelMsg::ExtendedData { data, ext })) if ext == 1 => {
+                        self.stderr.extend_from_slice(&data)
+                    }
+                    Ok(Some(russh::ChannelMsg::ExitStatus { exit_status })) => {
+                        self.exit_status = Some(exit_status);
+                    }
+                    Ok(Some(russh::ChannelMsg::Eof))
+                    | Ok(Some(russh::ChannelMsg::Close { .. }))
+                    | Ok(None) => break,
+                    Err(_) => break,
+                    _ => {}
+                }
+            }
+        }
+        let _ = self.channel.close().await;
+        Ok(ExecOutput {
+            stdout: self.stdout,
+            stderr: self.stderr,
+            exit_status: self.exit_status,
+        })
+    }
 }
 
 /// 探测远端登录 shell

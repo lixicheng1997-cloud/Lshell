@@ -19,10 +19,16 @@ import {
   TERM_FONT_MAX,
   TERM_FONT_MIN,
 } from "../lib/layout";
-import { getSettings, updateSetting, useSettings } from "../lib/settings";
+import {
+  effectiveUiFontStack,
+  getSettings,
+  updateSetting,
+  useSettings,
+} from "../lib/settings";
 import { CommandCapture } from "../lib/command-capture";
 import { copyText, readClipboardText } from "../lib/clipboard";
 import { resolveTheme } from "../lib/app-themes";
+import { hasEffectiveBackground } from "../lib/background";
 import { onThemeChange } from "../lib/theme";
 import TerminalSearch from "./TerminalSearch";
 
@@ -43,7 +49,7 @@ let webglCount = 0;
  * bgPanel，而不是各配色自带的 terminal background（那个通常更暗/更纯，会
  * 让终端区域看起来比周围面板深一档）。ANSI 前景色仍用配色自身定义，
  * 可读性由前景色决定。
- * 有背景图时画布透明，由 .term-host 的半透明面板底色透出背景。
+ * 有背景（用户自定义图或主题插画）时画布完全透明，背景图直接透到终端里。
  */
 function buildTerminalTheme(themeId: string, hasBackground: boolean): ITheme {
   const theme = resolveTheme(themeId);
@@ -63,6 +69,38 @@ function terminalFontStack(value: string): string {
   const lower = value.toLowerCase();
   if (lower.includes("monospace") || lower.includes("consolas")) return value;
   return `${value}, Consolas, monospace`;
+}
+
+/**
+ * 已内置的等宽中文字体家族名。
+ *
+ * 这些字体中英 2:1 精确对齐，终端可以直接整体使用。
+ */
+const MONO_CJK_FAMILIES = ["Lshell Mono KuaiLe", "Lshell Mono XiaoWei"];
+
+/**
+ * 终端字体栈。
+ *
+ * 终端必须等宽，否则字符网格会错位 —— 中文字体大多是比例字体，
+ * 直接拿来用会让表格对不齐。所以「跟随界面字体」的做法是：
+ * 英文与数字仍然用等宽字体（保证列对齐），
+ * 中文因为等宽字体没有对应字形，才会回落到界面字体。
+ */
+function buildTerminalFont(
+  terminalFamily: string,
+  followsUi: boolean,
+  uiFamily: string
+): string {
+  const mono = terminalFontStack(terminalFamily);
+  if (!followsUi) return mono;
+  // 界面字体本身就是内置的等宽中文字体（中英 2:1 精确对齐），
+  // 直接整体使用即可 —— 中文与英文来自同一款字体，字形统一且列不会错位。
+  if (MONO_CJK_FAMILIES.some((name) => uiFamily.includes(name))) {
+    return uiFamily;
+  }
+  // 界面字体是比例字体（用户自选的系统字体）：
+  // 等宽在前、界面字体在后，ASCII 命中等宽字体保证列对齐，中文回落到界面字体
+  return `${mono}, ${uiFamily}`;
 }
 
 interface Props {
@@ -171,25 +209,30 @@ export default function TerminalView({
   const rightClickRef = useRef(settings.terminal.rightClick);
   rightClickRef.current = settings.terminal.rightClick;
 
-  // 全局背景图由 AppBackground 负责渲染，终端只需要知道「要不要透明」
-  const hasBackgroundRef = useRef(settings.terminal.backgroundImage !== "");
-  hasBackgroundRef.current = settings.terminal.backgroundImage !== "";
+  // 全局背景由 AppBackground 负责渲染，终端只需要知道「要不要透明」。
+  // 用户自定义背景图与主题自带的插画都算背景。
+  const hasBackgroundRef = useRef(hasEffectiveBackground(settings));
+  hasBackgroundRef.current = hasEffectiveBackground(settings);
 
   useEffect(() => {
     if (!hostRef.current) return;
 
     const term = new Terminal({
-      fontFamily: terminalFontStack(getSettings().terminal.fontFamily),
+      fontFamily: buildTerminalFont(
+        getSettings().terminal.fontFamily,
+        getSettings().terminal.fontFollowsUi,
+        effectiveUiFontStack()
+      ),
       fontSize: getSettings().terminal.fontSize,
       lineHeight: 1.4,
       cursorBlink: getSettings().terminal.cursorBlink,
       cursorStyle: getSettings().terminal.cursorStyle,
       scrollback: getSettings().terminal.scrollback,
-      // 有背景图时需要画布透明，背景图才能从底下透出来
+      // 有背景时需要画布透明，背景图才能从底下透出来
       allowTransparency: true,
       theme: buildTerminalTheme(
         getSettings().theme,
-        getSettings().terminal.backgroundImage !== ""
+        hasEffectiveBackground(getSettings())
       ),
       // 搜索高亮要用 registerDecoration / registerMarker，
       // 它们属于 xterm 的 proposed API，必须显式开启，否则调用即抛错。
@@ -279,7 +322,7 @@ export default function TerminalView({
       onCwdChangeRef.current?.(p);
     });
 
-    // 主题切换时同步终端配色（「跟随系统」的系统深浅色变化也走这里）
+    // 主题切换时同步终端配色
     const unsubscribeTheme = onThemeChange((theme) => {
       term.options.theme = {
         ...theme.terminal,
@@ -515,20 +558,24 @@ export default function TerminalView({
     if (!term) return;
     const {
       fontFamily,
+      fontFollowsUi,
       fontSize,
       cursorStyle,
       cursorBlink,
       scrollback,
-      backgroundImage,
     } = settings.terminal;
-    term.options.fontFamily = terminalFontStack(fontFamily);
+    term.options.fontFamily = buildTerminalFont(
+      fontFamily,
+      fontFollowsUi,
+      effectiveUiFontStack()
+    );
     term.options.fontSize = fontSize;
     term.options.cursorStyle = cursorStyle;
     term.options.cursorBlink = cursorBlink;
     term.options.scrollback = scrollback;
     term.options.theme = buildTerminalTheme(
       settings.theme,
-      backgroundImage !== ""
+      hasEffectiveBackground(settings)
     );
     try {
       fitRef.current?.fit();
@@ -537,11 +584,15 @@ export default function TerminalView({
     }
   }, [
     settings.terminal.fontFamily,
+    settings.terminal.fontFollowsUi,
     settings.terminal.fontSize,
     settings.terminal.cursorStyle,
     settings.terminal.cursorBlink,
     settings.terminal.scrollback,
     settings.terminal.backgroundImage,
+    settings.appearance.artworkEnabled,
+    settings.appearance.fontMode,
+    settings.appearance.uiFont,
     settings.theme,
   ]);
 

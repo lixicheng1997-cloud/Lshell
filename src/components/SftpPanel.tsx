@@ -13,6 +13,7 @@ import { getSettings } from "../lib/settings";
 import Icon from "./Icon";
 import ConfirmDialog from "./ConfirmDialog";
 import PromptDialog from "./PromptDialog";
+import TerminalContextMenu, { type MenuItem } from "./TerminalContextMenu";
 
 interface RemoteEntry {
   name: string;
@@ -55,10 +56,36 @@ interface Props {
    * `nonce` 每次请求都会变化，用来区分「同一路径的重复请求」。
    */
   jumpTo?: { path: string; nonce: number } | null;
+  /** 双击 / 右键可编辑的文本文件时打开编辑器对话框 */
+  onEditFile?: (path: string) => void;
 }
 
-function formatSize(bytes: number): string {
-  if (bytes === 0) return "-";
+/** 双击即可打开编辑器的文件类型；其余文件仍走原有双击逻辑 */
+const EDITABLE_NAMES = new Set([
+  "dockerfile", "makefile", "nginx.conf", "sshd_config", "hosts",
+  "fstab", "crontab", "sudoers", "my.cnf", ".env", ".gitignore",
+  ".bashrc", ".profile",
+]);
+const EDITABLE_EXTS = new Set([
+  "conf", "config", "cfg", "ini", "cnf", "properties", "yaml", "yml",
+  "toml", "json", "jsonc", "sh", "bash", "zsh", "service", "timer",
+  "socket", "list", "repo", "py", "js", "ts", "jsx", "tsx", "go",
+  "rs", "c", "h", "cpp", "java", "php", "rb", "sql", "html", "css",
+  "md", "txt", "log",
+]);
+
+function isEditableFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  if (EDITABLE_NAMES.has(lower) || lower.endsWith(".service") || lower.endsWith(".timer")) {
+    return true;
+  }
+  const idx = lower.lastIndexOf(".");
+  return idx > 0 && EDITABLE_EXTS.has(lower.slice(idx + 1));
+}
+
+function formatSize(bytes: number, isDir = false): string {
+  if (isDir) return "—";
+  if (bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let value = bytes;
   let i = 0;
@@ -67,6 +94,21 @@ function formatSize(bytes: number): string {
     i++;
   }
   return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/** 远端 mtime 为 Unix 秒；列表用紧凑格式，完整时间放在 title */
+function formatTime(modified: number | null): string {
+  if (!modified) return "—";
+  const d = new Date(modified * 1000);
+  if (Number.isNaN(d.getTime())) return "—";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatTimeFull(modified: number | null): string {
+  if (!modified) return "未知";
+  const d = new Date(modified * 1000);
+  return Number.isNaN(d.getTime()) ? "未知" : d.toLocaleString("zh-CN");
 }
 
 /** 速度文案 */
@@ -142,6 +184,7 @@ export default function SftpPanel({
   onError,
   jumpTo,
   status,
+  onEditFile,
 }: Props) {
   /** 只有已连接的会话才能浏览 / 操作远端文件 */
   const connected = status === "connected";
@@ -159,10 +202,20 @@ export default function SftpPanel({
   const [pendingUpload, setPendingUpload] = useState<string[] | null>(null);
   /** 新建目录对话框 */
   const [creatingDir, setCreatingDir] = useState(false);
+  /** 新建文件对话框 */
+  const [creatingFile, setCreatingFile] = useState(false);
   /** 传输任务列表 */
   const [transfers, setTransfers] = useState<TransferView[]>([]);
   /** 指针是否拖着文件悬停在面板上 */
   const [dragOver, setDragOver] = useState(false);
+  /** 文件列表的右键菜单 */
+  const [fileMenu, setFileMenu] = useState<{
+    x: number;
+    y: number;
+    entry: RemoteEntry;
+  } | null>(null);
+  /** 列表空白处（当前目录）的右键菜单 */
+  const [dirMenu, setDirMenu] = useState<{ x: number; y: number } | null>(null);
 
   const panelRef = useRef<HTMLDivElement>(null);
   /** 当前目录的 ref：轮询回调里要用，避免闭包拿到旧值 */
@@ -564,6 +617,16 @@ export default function SftpPanel({
     void load(path);
   };
 
+  /** 由新建文件对话框调用；创建成功后直接打开编辑器 */
+  const createFile = async (name: string) => {
+    const remote = `${path.replace(/\/$/, "")}/${name}`;
+    await api.sftpTouch(sessionId, remote);
+    notify.success(`已创建文件 ${name}`);
+    setCreatingFile(false);
+    void load(path);
+    onEditFile?.(remote);
+  };
+
   if (collapsed) {
     const running = transfers.filter((t) => t.state === "running").length;
     return (
@@ -726,6 +789,14 @@ export default function SftpPanel({
         </button>
         <button
           className="btn sm icon outline"
+          onClick={() => setCreatingFile(true)}
+          data-tip="新建文件"
+          aria-label="新建文件"
+        >
+          <Icon name="file" size={13} />
+        </button>
+        <button
+          className="btn sm icon outline"
           onClick={() => setCreatingDir(true)}
           data-tip="新建目录"
           aria-label="新建目录"
@@ -785,11 +856,23 @@ export default function SftpPanel({
       </div>
 
       <div className="sftp-cols">
+        <span />
         <span>名称</span>
         <span className="size">大小</span>
+        <span className="time">修改时间</span>
+        <span />
       </div>
 
-      <div className="sftp-list">
+      <div
+        className="sftp-list"
+        onContextMenu={(e) => {
+          if (e.target !== e.currentTarget && (e.target as HTMLElement).closest(".f-row")) return;
+          e.preventDefault();
+          setFileMenu(null);
+          setSelected(new Set());
+          setDirMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
         {loading && <div className="sftp-empty">加载中…</div>}
         {!loading && entries.length === 0 && (
           <div className="sftp-empty">空目录</div>
@@ -804,14 +887,38 @@ export default function SftpPanel({
               selected.has(entry.path) ? "selected" : ""
             }`}
             onClick={(e) => handleSelect(entry, e)}
-            onDoubleClick={() => enter(entry)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              // 右键项即操作对象：未选中时先单选，避免误操作到其他多选条目
+              if (!selected.has(entry.path)) {
+                setSelected(new Set([entry.path]));
+                anchorRef.current = entry.path;
+              }
+              setFileMenu({ x: e.clientX, y: e.clientY, entry });
+            }}
+            onDoubleClick={() => {
+              if (!entry.isDir && onEditFile && isEditableFile(entry.name)) {
+                onEditFile(entry.path);
+              } else {
+                enter(entry);
+              }
+            }}
           >
             <Icon name={entry.isDir ? "folder" : "file"} className="fi" />
-            <span className="fname" title={entry.path}>
+            <span
+              className="fname"
+              title={
+                !entry.isDir && onEditFile && isEditableFile(entry.name)
+                  ? `${entry.path} · 双击编辑`
+                  : entry.path
+              }
+            >
               {entry.name}
             </span>
-            <span className="fsize">
-              {entry.isDir ? "" : formatSize(entry.size)}
+            <span className="fsize">{formatSize(entry.size, entry.isDir)}</span>
+            <span className="ftime" title={formatTimeFull(entry.modified)}>
+              {formatTime(entry.modified)}
             </span>
             <button
               className="icon-btn sm danger f-del"
@@ -827,6 +934,79 @@ export default function SftpPanel({
           </div>
         ))}
       </div>
+
+      {fileMenu && (
+        <TerminalContextMenu
+          x={fileMenu.x}
+          y={fileMenu.y}
+          onClose={() => setFileMenu(null)}
+          items={
+            [
+              !fileMenu.entry.isDir &&
+                onEditFile &&
+                isEditableFile(fileMenu.entry.name) && {
+                  id: "edit",
+                  label: "编辑",
+                  icon: "pencil" as const,
+                  onSelect: () => onEditFile(fileMenu.entry.path),
+                },
+              fileMenu.entry.isDir && {
+                id: "open",
+                label: "打开目录",
+                icon: "folder" as const,
+                onSelect: () => enter(fileMenu.entry),
+              },
+              {
+                id: "download",
+                label: "下载",
+                icon: "download" as const,
+                onSelect: () => void downloadSelection(),
+              },
+              {
+                id: "rename",
+                label: "重命名",
+                icon: "pencil" as const,
+                onSelect: () => setRenaming(fileMenu.entry),
+              },
+              {
+                id: "delete",
+                label: "删除",
+                icon: "trash" as const,
+                danger: true,
+                onSelect: () => setDeleting([fileMenu.entry]),
+              },
+            ].filter(Boolean) as MenuItem[]
+          }
+        />
+      )}
+
+      {dirMenu && (
+        <TerminalContextMenu
+          x={dirMenu.x}
+          y={dirMenu.y}
+          onClose={() => setDirMenu(null)}
+          items={[
+            {
+              id: "new-file",
+              label: "新建文件",
+              icon: "file" as const,
+              onSelect: () => setCreatingFile(true),
+            },
+            {
+              id: "new-dir",
+              label: "新建目录",
+              icon: "folder-plus" as const,
+              onSelect: () => setCreatingDir(true),
+            },
+            {
+              id: "refresh",
+              label: "刷新",
+              icon: "refresh" as const,
+              onSelect: () => void load(path),
+            },
+          ]}
+        />
+      )}
 
       {transfers.length > 0 && (
         <div className="sftp-transfers">
@@ -942,6 +1122,25 @@ export default function SftpPanel({
             <span>松开以上传到当前目录</span>
           </div>
         </div>
+      )}
+
+      {creatingFile && (
+        <PromptDialog
+          title="新建文件"
+          icon="file"
+          label="文件名"
+          placeholder="app.conf"
+          confirmText="创建并编辑"
+          validate={(value) =>
+            value === "." || value === ".."
+              ? "文件名不合法"
+              : value.includes("/")
+                ? "文件名不能包含 /"
+                : null
+          }
+          onSubmit={createFile}
+          onCancel={() => setCreatingFile(false)}
+        />
       )}
 
       {creatingDir && (

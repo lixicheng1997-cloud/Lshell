@@ -186,6 +186,20 @@ pub struct CommandRecord {
     pub created_at: i64,
 }
 
+/// 远程文件编辑的审计记录（不含内容与密码）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorAudit {
+    pub id: i64,
+    pub host_id: i64,
+    pub remote_path: String,
+    pub elevated_mode: String,
+    pub forced: bool,
+    pub result: String,
+    pub bytes: i64,
+    pub created_at: i64,
+}
+
 /// 导入预检里的一条提示（跳过的指令、无效行等）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

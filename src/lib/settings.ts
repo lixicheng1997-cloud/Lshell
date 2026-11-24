@@ -15,7 +15,16 @@
 import { useSyncExternalStore } from "react";
 import { api } from "./api";
 import { applyTheme } from "./theme";
-import { DEFAULT_THEME_ID, isThemeId, legacyThemeToId } from "./app-themes";
+import { uiFontStack } from "./fonts";
+import {
+  DEFAULT_THEME_ID,
+  isThemeId,
+  legacyThemeToId,
+  parseThemeOpacity,
+  resolveTheme,
+  themeOpacityKey,
+  type ThemeOpacity,
+} from "./app-themes";
 
 // ---------- 类型 ----------
 
@@ -27,6 +36,21 @@ export type BackgroundFit = "cover" | "contain" | "tile";
 export interface Settings {
   /** 统一主题 id（见 app-themes.ts），同时决定应用界面与终端配色 */
   theme: string;
+  /** 界面字体与主题插画 */
+  appearance: {
+    /** 界面字体 id，见 fonts.ts */
+    uiFont: string;
+    /** theme = 跟随主题推荐；custom = 使用 uiFont */
+    fontMode: "theme" | "custom";
+    /** 是否显示主题自带插画 */
+    artworkEnabled: boolean;
+    /**
+     * 每套主题单独的浓度覆盖，JSON 字符串。
+     * 形如 {"starry-book:dark":{"artwork":0.4,"panel":0.85}}；
+     * 缺失的键沿用主题自带值，切换主题时互不影响。
+     */
+    themeOpacity: string;
+  };
   /** 主机库宽度 */
   sidebarWidth: number;
   /** 文件面板宽度 */
@@ -35,6 +59,8 @@ export interface Settings {
   followCwd: boolean;
   terminal: {
     fontFamily: string;
+    /** 终端中文是否跟随界面字体 */
+    fontFollowsUi: boolean;
     fontSize: number;
     cursorStyle: CursorStyle;
     /** 光标是否闪烁 */
@@ -85,10 +111,15 @@ export interface Settings {
 /** 所有可配置项的扁平键（点号表示分组） */
 export type SettingsKey =
   | "theme"
+  | "appearance.uiFont"
+  | "appearance.fontMode"
+  | "appearance.artworkEnabled"
+  | "appearance.themeOpacity"
   | "sidebarWidth"
   | "sftpWidth"
   | "followCwd"
   | "terminal.fontFamily"
+  | "terminal.fontFollowsUi"
   | "terminal.fontSize"
   | "terminal.cursorStyle"
   | "terminal.cursorBlink"
@@ -124,11 +155,19 @@ export const DEFAULT_TERM_FONT_FAMILY =
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: DEFAULT_THEME_ID,
+  appearance: {
+    uiFont: "system",
+    fontMode: "theme",
+    artworkEnabled: true,
+    themeOpacity: "{}",
+  },
   sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
   sftpWidth: DEFAULT_SFTP_WIDTH,
   followCwd: true,
   terminal: {
     fontFamily: DEFAULT_TERM_FONT_FAMILY,
+    /** 终端中文是否跟随界面字体（英文数字仍用等宽字体保证列对齐） */
+    fontFollowsUi: false,
     fontSize: 13,
     cursorStyle: "block",
     cursorBlink: true,
@@ -163,10 +202,15 @@ export const DEFAULT_SETTINGS: Settings = {
 /** 设置键 → 数据库/localStorage 键（旧键名保持不变） */
 export const STORAGE_KEYS: Record<SettingsKey, string> = {
   theme: "theme",
+  "appearance.uiFont": "ui.fontFamily",
+  "appearance.fontMode": "ui.fontMode",
+  "appearance.artworkEnabled": "ui.artworkEnabled",
+  "appearance.themeOpacity": "ui.themeOpacity",
   sidebarWidth: "layout.sidebarWidth",
   sftpWidth: "layout.sftpWidth",
   followCwd: "layout.followCwd",
   "terminal.fontFamily": "term.fontFamily",
+  "terminal.fontFollowsUi": "term.fontFollowsUi",
   "terminal.fontSize": "layout.termFontSize",
   "terminal.cursorStyle": "term.cursorStyle",
   "terminal.cursorBlink": "term.cursorBlink",
@@ -199,6 +243,7 @@ const NUM_RANGES: Partial<Record<SettingsKey, [number, number]>> = {
   "terminal.fontSize": [TERM_FONT_MIN, TERM_FONT_MAX],
   "terminal.scrollback": [1000, 50000],
   "terminal.backgroundOpacity": [0.05, 1],
+
   "terminal.backgroundBlur": [0, 24],
   "connection.timeoutSec": [5, 120],
   "connection.defaultPort": [1, 65535],
@@ -212,6 +257,7 @@ const FRACTIONAL_KEYS = new Set<SettingsKey>(["terminal.backgroundOpacity"]);
 function cloneDefaults(): Settings {
   return {
     ...DEFAULT_SETTINGS,
+    appearance: { ...DEFAULT_SETTINGS.appearance },
     terminal: { ...DEFAULT_SETTINGS.terminal },
     connection: { ...DEFAULT_SETTINGS.connection },
     transfer: { ...DEFAULT_SETTINGS.transfer },
@@ -292,6 +338,11 @@ function parseValue(key: SettingsKey, raw: string): string | number | boolean {
   switch (key) {
     case "theme":
       return isThemeId(raw) ? raw : def;
+    case "appearance.fontMode":
+      return raw === "theme" || raw === "custom" ? raw : def;
+    case "appearance.themeOpacity":
+      // 只保留可解析的 JSON，脏数据直接回落成空覆盖表
+      return parseThemeOpacity(raw) ? raw : def;
     case "terminal.cursorStyle":
       return raw === "block" || raw === "underline" || raw === "bar"
         ? raw
@@ -339,21 +390,46 @@ function readCached(): Settings {
 
 let current: Settings = readCached();
 const listeners = new Set<() => void>();
-let systemThemeBound = false;
 
 function notify() {
   for (const listener of listeners) listener();
 }
 
-/** 跟随系统时，系统深浅色切换要实时响应 */
-function bindSystemTheme() {
-  if (systemThemeBound) return;
-  systemThemeBound = true;
-  window.matchMedia("(prefers-color-scheme: light)").addEventListener(
-    "change",
-    () => {
-      if (current.theme === "system") applyTheme("system");
-    }
+/**
+ * 取当前主题的浓度覆盖。
+ *
+ * 键是「族:深浅」，同一族的两套主题互不干扰；
+ * 未覆盖的项返回 undefined，表示沿用主题自带值。
+ */
+export function currentThemeOpacity(): ThemeOpacity {
+  const theme = resolveTheme(current.theme);
+  const table = parseThemeOpacity(current.appearance.themeOpacity);
+  return table[themeOpacityKey(theme)] ?? {};
+}
+
+/**
+ * 当前生效的界面字体栈。
+ *
+ * 手动指定时用用户选的那款，否则用主题推荐；
+ * 终端的「跟随界面字体」也取这个值。
+ */
+export function effectiveUiFontStack(): string {
+  if (current.appearance.fontMode === "custom") {
+    return uiFontStack(current.appearance.uiFont);
+  }
+  const theme = resolveTheme(current.theme);
+  return theme.fonts?.ui ?? uiFontStack("system");
+}
+
+/** 应用当前主题：字体按模式决定，其余浓度取当前主题的覆盖值 */
+function applyCurrentTheme() {
+  const opacity = currentThemeOpacity();
+  applyTheme(
+    current.theme,
+    current.appearance.fontMode === "custom"
+      ? current.appearance.uiFont
+      : undefined,
+    opacity.panel
   );
 }
 
@@ -368,8 +444,7 @@ function mirrorAll() {
 
 /** 启动时初始化：先应用缓存主题避免闪屏，再从数据库补齐 */
 export async function initSettings(): Promise<Settings> {
-  applyTheme(current.theme);
-  bindSystemTheme();
+  applyCurrentTheme();
 
   try {
     const all = await api.getAllSettings();
@@ -402,7 +477,7 @@ export async function initSettings(): Promise<Settings> {
     // 浏览器预览 / 命令缺失时保持 localStorage 副本
   }
 
-  applyTheme(current.theme);
+  applyCurrentTheme();
   mirrorAll();
   notify();
   return current;
@@ -434,7 +509,7 @@ export function updateSetting(
 ): void {
   const parsed = parseValue(key, serializeValue(key, value));
   current = setAt(current, key, parsed);
-  if (key === "theme") applyTheme(current.theme);
+  if (key === "theme" || key.startsWith("appearance.")) applyCurrentTheme();
   writeLocal(STORAGE_KEYS[key], serializeValue(key, parsed));
   notify();
   api.setSetting(STORAGE_KEYS[key], serializeValue(key, parsed)).catch(() => {
@@ -448,6 +523,7 @@ export function updateSetting(
 export function cloneSettings(source: Settings = current): Settings {
   return {
     ...source,
+    appearance: { ...source.appearance },
     terminal: { ...source.terminal },
     connection: { ...source.connection },
     transfer: { ...source.transfer },
@@ -514,7 +590,7 @@ export async function commitSettings(
   }
 
   current = next;
-  if (changed.includes("theme")) applyTheme(current.theme);
+  if (changed.some((key) => key === "theme" || key.startsWith("appearance."))) applyCurrentTheme();
   notify();
 
   await Promise.all(writes);

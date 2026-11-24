@@ -7,7 +7,10 @@
 
 use std::sync::Arc;
 
-use tauri::{Emitter, State};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use tauri::ipc::InvokeBody;
+use tauri::{Emitter, Manager, State};
 
 use crate::db::now_secs;
 use crate::error::{AppError, Result};
@@ -1798,6 +1801,35 @@ pub async fn sftp_mkdir(
     Ok(())
 }
 
+/// 在远端创建空文件；EXCLUDE 保证同名文件不会被覆盖
+#[tauri::command]
+pub async fn sftp_touch(
+    sessions: State<'_, session::SharedSessions>,
+    session_id: String,
+    path: String,
+) -> Result<()> {
+    let sftp = {
+        let mgr = sessions.lock().await;
+        mgr.sftp(&session_id).await
+    }
+    .ok_or_else(|| AppError::NotFound(format!("会话 {session_id} 不存在")))?;
+
+    let file = sftp
+        .open_with_flags_and_attributes(
+            &path,
+            russh_sftp::protocol::OpenFlags::WRITE
+                | russh_sftp::protocol::OpenFlags::CREATE
+                | russh_sftp::protocol::OpenFlags::EXCLUDE,
+            russh_sftp::protocol::FileAttributes::default(),
+        )
+        .await
+        .map_err(|e| AppError::Transfer(format!("创建文件失败: {e}")))?;
+    file.close()
+        .await
+        .map_err(|e| AppError::Transfer(format!("关闭文件失败: {e}")))?;
+    Ok(())
+}
+
 /// 递归删除远端目录：先删子项，再删目录自身
 ///
 /// 异步递归必须装箱，否则编译器无法确定 future 尺寸。
@@ -1871,6 +1903,157 @@ pub async fn sftp_rename(
         .await
         .map_err(|e| AppError::Transfer(format!("重命名失败: {e}")))?;
     Ok(())
+}
+
+// ---------- 远程文件编辑 ----------
+
+/// 打开远端文本文件用于在线编辑。
+///
+/// 内容以 base64 随元数据一起返回：Tauri 的响应只有 body、没有 headers，
+/// 无法像请求方向那样把元数据塞进 headers，而拆成两次调用读远端又会引入
+/// TOCTOU（内容与基线可能来自不同版本）。
+#[tauri::command]
+pub async fn editor_open(
+    sessions: State<'_, session::SharedSessions>,
+    session_id: String,
+    path: String,
+) -> Result<crate::editor::OpenMeta> {
+    let sftp = {
+        let mgr = sessions.lock().await;
+        mgr.sftp(&session_id).await
+    }
+    .ok_or_else(|| AppError::NotFound(format!("会话 {session_id} 不存在")))?;
+
+    crate::editor::open_document(&sftp, &path).await
+}
+
+/// 保存远端文件。
+///
+/// 内容走 Tauri IPC 的 Raw body（避免 JSON 数组膨胀），元数据放在
+/// `x-lshell-meta` 请求头（base64(JSON)）。请求方向支持 Raw 已在 Spike S1 验证。
+#[tauri::command]
+pub async fn editor_save(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<crate::editor::SaveResult> {
+    let meta_raw = request
+        .headers()
+        .get("x-lshell-meta")
+        .ok_or_else(|| AppError::Invalid("缺少 x-lshell-meta 请求头".into()))?
+        .to_str()
+        .map_err(|_| AppError::Invalid("x-lshell-meta 请求头不是合法文本".into()))?;
+    let meta_bytes = BASE64
+        .decode(meta_raw)
+        .map_err(|e| AppError::Invalid(format!("请求元数据 base64 解码失败: {e}")))?;
+    let meta: crate::editor::SaveMeta = serde_json::from_slice(&meta_bytes)
+        .map_err(|e| AppError::Invalid(format!("请求元数据解析失败: {e}")))?;
+
+    let InvokeBody::Raw(content) = request.body() else {
+        return Err(AppError::Invalid("文件内容必须以二进制 body 传递".into()));
+    };
+
+    let sessions = app.state::<session::SharedSessions>();
+    let (host_id, conn) = {
+        let mgr = sessions.lock().await;
+        let active = mgr
+            .get(&meta.session_id)
+            .ok_or_else(|| AppError::NotFound(format!("会话 {} 不存在", meta.session_id)))?;
+        (active.host_id, active.conn.clone())
+    };
+    let sftp = {
+        let mgr = sessions.lock().await;
+        mgr.sftp(&meta.session_id).await
+    }
+    .ok_or_else(|| AppError::NotFound(format!("会话 {} 不存在", meta.session_id)))?;
+
+    if let Some(elevation) = &meta.elevation {
+        let mode_label = match elevation {
+            crate::editor::Elevation::Passwordless => "passwordless",
+            crate::editor::Elevation::Password { .. } => "password",
+        };
+        let outcome = crate::editor::save_elevated(
+            &sftp,
+            &conn,
+            &meta.path,
+            content,
+            &meta.baseline,
+            meta.force,
+            elevation,
+        )
+        .await;
+
+        // 审计只记录路径 / 提权方式 / 结果 / 字节数，绝不记录密码或内容。
+        let (result_label, bytes) = match &outcome {
+            Ok(crate::editor::SaveResult::Saved { .. }) => ("success", content.len() as i64),
+            Ok(crate::editor::SaveResult::Conflict { .. }) => ("conflict", 0i64),
+            Err(_) => ("failed", 0i64),
+        };
+        if let Ok(db) = app.state::<AppState>().db() {
+            let _ = db.insert_editor_audit(
+                host_id,
+                &meta.path,
+                mode_label,
+                meta.force,
+                result_label,
+                bytes,
+            );
+        }
+        return outcome;
+    }
+
+    crate::editor::save_document(&sftp, &meta.path, content, &meta.baseline, meta.force).await
+}
+
+/// 列出文件的历史备份（最多 20 条）。
+#[tauri::command]
+pub async fn editor_list_backups(
+    sessions: State<'_, session::SharedSessions>,
+    session_id: String,
+    path: String,
+) -> Result<Vec<String>> {
+    let sftp = {
+        let mgr = sessions.lock().await;
+        mgr.sftp(&session_id).await
+    }
+    .ok_or_else(|| AppError::NotFound(format!("会话 {session_id} 不存在")))?;
+    crate::editor::list_backups(&sftp, &path).await
+}
+
+/// 从备份恢复文件。
+#[tauri::command]
+pub async fn editor_restore(
+    sessions: State<'_, session::SharedSessions>,
+    session_id: String,
+    path: String,
+    backup_path: String,
+    baseline: Option<crate::editor::Baseline>,
+    force: Option<bool>,
+) -> Result<crate::editor::SaveResult> {
+    let sftp = {
+        let mgr = sessions.lock().await;
+        mgr.sftp(&session_id).await
+    }
+    .ok_or_else(|| AppError::NotFound(format!("会话 {session_id} 不存在")))?;
+    crate::editor::restore_backup(
+        &sftp,
+        &path,
+        &backup_path,
+        baseline.as_ref(),
+        force.unwrap_or(false),
+    )
+    .await
+}
+
+/// 列出远程文件编辑审计记录（不含内容与密码）。
+#[tauri::command]
+pub fn editor_audit_list(
+    state: State<'_, AppState>,
+    host_id: Option<i64>,
+    limit: Option<i64>,
+) -> Result<Vec<models::EditorAudit>> {
+    Ok(state
+        .db()?
+        .list_editor_audit(host_id, limit.unwrap_or(50))?)
 }
 
 // ---------- 端口转发 ----------

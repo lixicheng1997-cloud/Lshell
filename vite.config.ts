@@ -12,7 +12,7 @@ export default defineConfig({
     preserveSymlinks: true,
   },
   server: {
-    port: 5173,
+    port: 5174,
     strictPort: true,
     watch: {
       ignored: ["**/src-tauri/**"],

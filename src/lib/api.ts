@@ -245,10 +245,66 @@ export const api = {
   ) => invoke<number>("sftp_upload", { sessionId, localPath, remotePath }),
   sftpMkdir: (sessionId: string, path: string) =>
     invoke<void>("sftp_mkdir", { sessionId, path }),
+  /** 创建空文件（远端已有同名文件时不覆盖） */
+  sftpTouch: (sessionId: string, path: string) =>
+    invoke<void>("sftp_touch", { sessionId, path }),
   sftpRemove: (sessionId: string, path: string, isDir: boolean) =>
     invoke<void>("sftp_remove", { sessionId, path, isDir }),
   sftpRename: (sessionId: string, fromPath: string, toPath: string) =>
     invoke<void>("sftp_rename", { sessionId, fromPath, toPath }),
+
+  // 远程文件编辑
+  editorOpen: (sessionId: string, path: string) =>
+    invoke<OpenMeta>("editor_open", { sessionId, path }),
+  /**
+   * 保存内容。内容走 Raw body，元数据编码为 base64(JSON) 放在请求头。
+   */
+  editorSave: (
+    sessionId: string,
+    path: string,
+    content: Uint8Array,
+    baseline: EditorBaseline,
+    options?: {
+      force?: boolean;
+      elevation?:
+        | { mode: "passwordless" }
+        | { mode: "password"; password: string }
+        | null;
+    }
+  ): Promise<SaveResult> => {
+    const meta = {
+      sessionId,
+      path,
+      baseline,
+      force: options?.force ?? false,
+      elevation: options?.elevation ?? null,
+    };
+    const metaB64 = utf8ToBase64(JSON.stringify(meta));
+    return invoke<SaveResult>("editor_save", content, {
+      headers: { "x-lshell-meta": metaB64 },
+    });
+  },
+  editorListBackups: (sessionId: string, path: string) =>
+    invoke<string[]>("editor_list_backups", { sessionId, path }),
+  editorRestore: (
+    sessionId: string,
+    path: string,
+    backupPath: string,
+    baseline?: EditorBaseline | null,
+    force?: boolean
+  ) =>
+    invoke<SaveResult>("editor_restore", {
+      sessionId,
+      path,
+      backupPath,
+      baseline: baseline ?? null,
+      force: force ?? false,
+    }),
+  editorAuditList: (hostId?: number | null, limit?: number) =>
+    invoke<EditorAudit[]>("editor_audit_list", {
+      hostId: hostId ?? null,
+      limit: limit ?? 50,
+    }),
 
   // 文件传输
   /** 列出全部传输任务的状态快照 */
@@ -322,6 +378,63 @@ export interface SftpListing {
   /** 解析后的绝对路径 */
   path: string;
   entries: RemoteEntry[];
+}
+
+function utf8ToBase64(input: string): string {
+  const bytes = new TextEncoder().encode(input);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/** 保存前比对的基线：SFTP 没有 ETag，mtime 精度也可能只有秒级 */
+export interface EditorBaseline {
+  size: number;
+  mtime: number;
+  sha256: string;
+}
+
+/** 打开远端文本文件返回的元数据（内容在 contentBase64） */
+export interface OpenMeta {
+  path: string;
+  encoding: string;
+  eol: "lf" | "crlf" | "none";
+  bom: boolean;
+  mixedEol: boolean;
+  language: string;
+  readOnly: boolean;
+  needsElevation: boolean;
+  mode: number;
+  uid: number | null;
+  gid: number | null;
+  baseline: EditorBaseline;
+  softLimitMode: boolean;
+  contentBase64: string;
+  warning: string | null;
+}
+
+export type SaveResult =
+  | {
+      status: "saved";
+      baseline: EditorBaseline;
+      backupPath: string | null;
+      modeWarning: string | null;
+    }
+  | {
+      status: "conflict";
+      remoteBase64: string;
+      remoteBaseline: EditorBaseline;
+    };
+
+export interface EditorAudit {
+  id: number;
+  hostId: number;
+  remotePath: string;
+  elevatedMode: string;
+  forced: boolean;
+  result: string;
+  bytes: number;
+  createdAt: number;
 }
 
 /** 运行中的端口转发 */

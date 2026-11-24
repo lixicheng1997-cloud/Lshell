@@ -1,0 +1,49 @@
+/* ============================================================
+   主题形态与族的样式变体
+   ------------------------------------------------------------
+   这里只放少量「形态 / 族」专属规则；颜色一律走 token，
+   圆角与动效已在 theme.ts 写入变量，组件文件无需改。
+   ============================================================ */
+
+/* 圆润 / 柔和形态：主按钮加一层柔和光晕 */
+html[data-theme-shape="round"] .btn.primary,
+html[data-theme-shape="soft"] .btn.primary {
+  box-shadow: 0 6px 18px -8px var(--accent-glow);
+}
+
+/* 圆润形态：标签与徽章改胶囊 */
+html[data-theme-shape="round"] .tag,
+html[data-theme-shape="round"] .theme-badge,
+html[data-theme-shape="soft"] .tag {
+  border-radius: var(--r-pill);
+}
+
+/* 云朵族：搜索框与输入框更圆润 */
+html[data-theme-family="cloud"] .search,
+html[data-theme-family="cloud"] .omni {
+  border-radius: var(--r-pill);
+}
+
+/* 绘本族：分组标题前加一个强调圆点 */
+html[data-theme-family="starry-book"] .side-head .label::before,
+html[data-theme-family="starry-book"] .recent-head .label::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+
+/* 蜜桃族：对话框标题字距随主题密度收紧 */
+html[data-theme-family="peach"] .dialog h2,
+html[data-theme-family="peach"] .settings-section h3 {
+  letter-spacing: var(--ls-label);
+}
+
+/* 薄荷族：强调描边更明显一点 */
+html[data-theme-family="mint"] .btn.primary {
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}

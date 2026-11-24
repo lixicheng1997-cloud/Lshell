@@ -6,17 +6,10 @@
  *
  * 持久化不在这里做 —— 统一交给 settings.ts 的注册表。
  */
-import { resolveTheme, type AppTheme } from "./app-themes";
+import { resolveTheme, shapeOf, type AppTheme } from "./app-themes";
+import { uiFontStack } from "./fonts";
 
 const EVENT_NAME = "lshell:themechange";
-
-/**
- * 面板表面在背景图上的透明度。
- *
- * 侧栏、标签栏、文件面板、状态栏、终端容器都用它，
- * 只由主题色决定颜色，避免各处各自调一套半透明值。
- */
-const VEIL_ALPHA = 0.8;
 
 function channel(hex: string, index: number): number {
   const clean = hex.replace("#", "");
@@ -29,17 +22,47 @@ function rgba(hex: string, alpha: number): string {
   return `rgba(${channel(hex, 0)}, ${channel(hex, 1)}, ${channel(hex, 2)}, ${alpha})`;
 }
 
-/** 应用一套主题：写入 CSS 变量、切换深浅标记、广播变更 */
-export function applyTheme(themeId: string): AppTheme {
+/**
+ * 应用一套主题：写入 CSS 变量、切换深浅标记、广播变更
+ *
+ * @param themeId 主题 id
+ * @param uiFont 用户手动指定的界面字体；不传则用主题推荐字体
+ * @param panelOpacity 面板不透明度；不传则用主题形态自带值
+ */
+export function applyTheme(
+  themeId: string,
+  uiFont?: string,
+  panelOpacity?: number
+): AppTheme {
   const theme = resolveTheme(themeId);
 
   const root = document.documentElement;
   const p = theme.app;
   const t = theme.terminal;
+  const shape = shapeOf(theme);
   const set = (name: string, value: string) => root.style.setProperty(name, value);
+  // 面板浓度：用户自定义优先，否则用主题形态的值
+  const veil = panelOpacity ?? shape.veil;
 
-  // 深浅标记：tokens.css 里的 light 专属规则（输入框底色、阴影）仍据此生效
+  // 深浅 / 族 / 形态标记：tokens.css 的 light 规则与 theme-variants.css 据此生效
   root.dataset.theme = theme.mode;
+  root.dataset.themeFamily = theme.family ?? "default";
+  root.dataset.themeShape = shape.id;
+
+  // 形态层：圆角、胶囊、动效、排版密度与面板材质
+  set("--r-sm", shape.radius[0]);
+  set("--r-md", shape.radius[1]);
+  set("--r-lg", shape.radius[2]);
+  set("--r-xl", shape.radius[3]);
+  set("--r-pill", shape.pill);
+  set("--veil-panel", String(veil));
+  set("--dur", shape.duration);
+  set("--ease", shape.ease);
+  set("--ls-label", shape.labelSpacing);
+  set("--fw-label", String(shape.labelWeight));
+
+  // 字体：用户手动选择优先，否则用主题推荐字体，最后回落系统默认
+  set("--font-ui", uiFont ? uiFontStack(uiFont) : theme.fonts?.ui ?? uiFontStack("system"));
 
   // 应用界面色板
   set("--bg-app", p.bgApp);
@@ -75,11 +98,10 @@ export function applyTheme(themeId: string): AppTheme {
   set("--info", p.info);
   set("--info-dim", rgba(p.info, 0.14));
 
-  // 半透明表面：铺背景图时用，保证面板文字可读。
-  // 终端容器不再单独一套：和侧栏/标签栏/状态栏共用同一块「面板材质」，
-  // 颜色与透明度都来自 --bg-panel / --bg-panel-veil。
-  set("--bg-panel-veil", rgba(p.bgPanel, VEIL_ALPHA));
-  set("--bg-surface-veil", rgba(p.bgSurface, VEIL_ALPHA));
+  // 半透明表面：铺背景图时用。面板透明度由主题形态决定；
+  // 终端容器单独用更高的不透明度，保证代码在插画上仍然可读。
+  set("--bg-panel-veil", rgba(p.bgPanel, veil));
+  set("--bg-surface-veil", rgba(p.bgSurface, veil));
 
   // 滚动条
   set("--scroll-thumb", p.lineStrong);
@@ -113,7 +135,7 @@ export function applyTheme(themeId: string): AppTheme {
   return theme;
 }
 
-/** 订阅主题变更（含「跟随系统」时系统深浅色切换），返回取消订阅函数 */
+/** 订阅主题变更，返回取消订阅函数 */
 export function onThemeChange(handler: (theme: AppTheme) => void): () => void {
   const listener = (e: Event) => {
     const detail = (e as CustomEvent<{ theme: AppTheme }>).detail;

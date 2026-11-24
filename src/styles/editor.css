@@ -1,0 +1,184 @@
+/* 远程文件编辑器样式：全部引用 tokens.css 变量，跟随深浅主题 */
+
+.editor-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* 编辑器独立模态窗口 */
+/* 低于通用 overlay(100)：保存/冲突/关闭确认对话框需要盖在编辑器之上 */
+.editor-modal-overlay {
+  z-index: 90;
+}
+
+.dialog.editor-modal {
+  width: min(1180px, 94vw);
+  height: min(820px, 90vh);
+  max-height: 90vh;
+  padding: 0;
+}
+
+.editor-modal header {
+  gap: 8px;
+}
+
+.editor-modal-title {
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.editor-modal-switch {
+  max-width: 260px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-surface);
+  color: var(--fg);
+  font-size: 12px;
+  outline: none;
+}
+
+.editor-modal-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-faint);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.editor-modal-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.editor-modal-body > .editor-tab {
+  flex: 1;
+}
+
+/* 与其他对话框共用 .dialog footer 的按钮样式，仅补左侧状态徽章布局 */
+.editor-modal-footer {
+  align-items: center;
+}
+
+.editor-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+}
+
+.editor-badge {
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: var(--bg-raised);
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.editor-badge.dirty {
+  background: var(--warn-dim);
+  color: var(--warn);
+}
+
+.editor-canvas-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editor-canvas,
+.editor-canvas .cm-editor {
+  height: 100%;
+}
+
+.editor-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-app);
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+.editor-overlay.error {
+  color: var(--err);
+  padding: 24px;
+  text-align: center;
+}
+
+.editor-status {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 24px;
+  padding: 0 12px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+  color: var(--fg-faint);
+  font-size: 11px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.editor-status .warn {
+  color: var(--warn);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-dialog-path {
+  margin: 8px 0 0;
+  color: var(--fg-muted);
+  font-family: var(--font-mono, Consolas, monospace);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.editor-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.editor-dialog-field input {
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-surface);
+  color: var(--fg);
+  outline: none;
+}
+
+.editor-dialog-field input:focus {
+  border-color: var(--accent-line);
+}
+
+.editor-dialog-diff {
+  max-height: 220px;
+  margin: 12px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  font-family: var(--font-mono, Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+}

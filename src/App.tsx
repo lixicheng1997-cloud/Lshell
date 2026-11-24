@@ -26,6 +26,10 @@ import HostDialog from "./components/HostDialog";
 import TerminalView from "./components/TerminalView";
 import HostKeyDialog from "./components/HostKeyDialog";
 import SftpPanel from "./components/SftpPanel";
+import { EditorDialog } from "./components/EditorDialog";
+import { EditorSaveDialog, type SaveChoice } from "./components/EditorSaveDialog";
+import { useEditorTabs, type EditorTab as EditorTabModel } from "./lib/editorTabs";
+import { base64ToBytes, bytesToText, encodeForSave } from "./lib/editor";
 import ForwardPanel from "./components/ForwardPanel";
 import ShortcutHelp from "./components/ShortcutHelp";
 import AboutDialog from "./components/AboutDialog";
@@ -34,6 +38,7 @@ import UpdateDialog from "./components/UpdateDialog";
 import TrayHintDialog from "./components/TrayHintDialog";
 import CommandHistoryPanel from "./components/CommandHistoryPanel";
 import AppBackground from "./components/AppBackground";
+import { hasEffectiveBackground } from "./lib/background";
 import Resizer from "./components/Resizer";
 import TerminalContextMenu from "./components/TerminalContextMenu";
 import Icon from "./components/Icon";
@@ -158,6 +163,150 @@ export default function App() {
   } | null>(null);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
+
+  // ---------- 远程文件编辑 ----------
+  const {
+    tabs: editorTabs,
+    activeId: activeEditorId,
+    open: openEditorTab,
+    close: closeEditorTab,
+    updateSessionId: updateEditorSessionId,
+    setActive: setActiveEditor,
+  } = useEditorTabs();
+
+  const [saveDialog, setSaveDialog] = useState<{
+    kind: "elevate" | "conflict" | "error";
+    tab: EditorTabModel;
+    remoteText?: string;
+    message?: string;
+  } | null>(null);
+  const [allowSudoPassword, setAllowSudoPassword] = useState(false);
+
+  useEffect(() => {
+    api
+      .getSetting("editor.allowSudoPassword")
+      .then((v) => setAllowSudoPassword(v === "true"))
+      .catch(() => {});
+  }, []);
+
+  // 重启后恢复的编辑器草稿原本靠页签可见；改为对话框后主动弹出第一份草稿
+  useEffect(() => {
+    if (!activeEditorId && editorTabs.length > 0) {
+      setActiveEditor(editorTabs[0].id);
+    }
+  }, [activeEditorId, editorTabs, setActiveEditor]);
+
+  // 会话关闭 / 主机删除时清理编辑器；重连换了 tabId 时跟随新的 sessionId
+  useEffect(() => {
+    const ids = new Set(tabs.map((t) => t.id));
+    for (const et of editorTabs) {
+      if (ids.has(et.sessionId)) continue;
+      const replacement = tabs.find((t) => t.hostId === et.hostId);
+      if (replacement) updateEditorSessionId(et.sessionId, replacement.id);
+      else closeEditorTab(et.id);
+    }
+  }, [tabs, editorTabs, updateEditorSessionId, closeEditorTab]);
+
+  const handleOpenEditor = useCallback(
+    async (sessionId: string, path: string) => {
+      const host = tabs.find((t) => t.id === sessionId);
+      if (!host || host.status !== "connected") {
+        notify.error("请先连接该主机再编辑文件");
+        return;
+      }
+      try {
+        const meta = await api.editorOpen(sessionId, path);
+        openEditorTab({ sessionId, hostId: host.hostId, alias: host.alias, meta });
+      } catch (e) {
+        notify.error(errorMessage(e));
+      }
+    },
+    [tabs, openEditorTab, notify]
+  );
+
+  const performSave = useCallback(
+    async (tab: EditorTabModel, choice: SaveChoice) => {
+      // 从 store 取最新文本：用户可能在渲染与点击保存之间又输入了内容
+      const current =
+        useEditorTabs.getState().tabs.find((t) => t.id === tab.id) ?? tab;
+      try {
+        const content = encodeForSave(current.text, current.meta.eol, current.meta.bom);
+        const elevation =
+          choice.elevation ??
+          (current.meta.needsElevation
+            ? ({ mode: "passwordless" } as const)
+            : null);
+        const result = await api.editorSave(
+          current.sessionId,
+          current.path,
+          content,
+          current.baseline,
+          { force: choice.force, elevation }
+        );
+        if (result.status === "conflict") {
+          setSaveDialog({
+            kind: "conflict",
+            tab: current,
+            remoteText: bytesToText(base64ToBytes(result.remoteBase64)),
+          });
+          return;
+        }
+        // 保存成功后把当前文本记为新的基准，避免关闭时误判为未保存
+        useEditorTabs
+          .getState()
+          .setSaved(current.id, result.baseline, current.text, result.backupPath);
+        setSaveDialog(null);
+        notify.info(
+          result.backupPath ? `已保存，备份：${result.backupPath}` : "已保存"
+        );
+        if (result.modeWarning) notify.error(result.modeWarning);
+        // 保存即关闭当前编辑器标签；若还有其他编辑器，对话框会切到下一份
+        closeEditorTab(current.id);
+      } catch (e) {
+        setSaveDialog({ kind: "error", tab: current, message: errorMessage(e) });
+      }
+    },
+    [notify, closeEditorTab]
+  );
+
+  const handleRequestSave = useCallback(
+    (tab: EditorTabModel) => {
+      if (tab.meta.readOnly && !tab.meta.needsElevation) return;
+      if (tab.meta.needsElevation && !tab.meta.readOnly) {
+        setSaveDialog({ kind: "elevate", tab });
+        return;
+      }
+      void performSave(tab, {});
+    },
+    [performSave]
+  );
+
+  const handleReloadEditor = useCallback(
+    async (tab: EditorTabModel) => {
+      try {
+        const meta = await api.editorOpen(tab.sessionId, tab.path);
+        const text = bytesToText(base64ToBytes(meta.contentBase64));
+        useEditorTabs.setState((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.id === tab.id
+              ? {
+                  ...t,
+                  meta,
+                  text,
+                  savedText: text,
+                  baseline: meta.baseline,
+                  dirty: false,
+                }
+              : t
+          ),
+        }));
+        setSaveDialog(null);
+      } catch (e) {
+        notify.error(errorMessage(e));
+      }
+    },
+    [notify]
+  );
 
   /**
    * 曾经被激活过的标签 id。
@@ -580,8 +729,8 @@ export default function App() {
     );
   }
 
-  // 铺背景图时，各面板切换成半透明表面，避免图片透出来影响阅读
-  const hasBackground = settings.terminal.backgroundImage !== "";
+  // 铺背景图时（用户自定义或主题自带插画），面板切换成半透明表面
+  const hasBackground = hasEffectiveBackground(settings);
 
   return (
     <div className={`app ${hasBackground ? "with-bg" : ""}`}>
@@ -800,6 +949,9 @@ export default function App() {
           onError={notify.error}
           jumpTo={sftpJump}
           status={activeTab?.status ?? null}
+          onEditFile={(path) => {
+            if (activeTab) void handleOpenEditor(activeTab.id, path);
+          }}
         />
       </div>
 
@@ -811,6 +963,31 @@ export default function App() {
         tagCount={tags.length}
         sessionCount={tabs.length}
       />
+
+      <EditorDialog
+        tabs={editorTabs}
+        activeId={activeEditorId}
+        sessionStatus={(id) =>
+          tabs.find((t) => t.id === id)?.status ?? "closed"
+        }
+        onSelect={setActiveEditor}
+        onClose={closeEditorTab}
+        onRequestSave={handleRequestSave}
+        blocked={saveDialog !== null}
+      />
+
+      {saveDialog && (
+        <EditorSaveDialog
+          kind={saveDialog.kind}
+          tab={saveDialog.tab}
+          remoteText={saveDialog.remoteText}
+          message={saveDialog.message}
+          allowPassword={allowSudoPassword}
+          onConfirm={(choice) => void performSave(saveDialog.tab, choice)}
+          onReload={() => void handleReloadEditor(saveDialog.tab)}
+          onCancel={() => setSaveDialog(null)}
+        />
+      )}
 
       {tabMenu && (
         <TerminalContextMenu

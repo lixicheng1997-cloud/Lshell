@@ -1,0 +1,38 @@
+/* ============================================================
+   内置中文字体
+   ------------------------------------------------------------
+   两款字体都是 SIL Open Font License 1.1，允许商用与再分发，
+   许可全文见 src/assets/fonts/OFL.txt。
+
+   「Lshell Mono KuaiLe」「Lshell Mono XiaoWei」由
+   scripts/build_mono_cjk_font.py 合成：
+     - 中文字形取自站酷快乐体 / 站酷小薇体（保持可爱手绘感）
+     - 英文字形换成等宽字体（Consolas）的字形，宽度完全一致
+     - 中文字宽统一为英文的两倍，中英 2:1 精确对齐
+
+   这样同一款字体既能用在界面，也能用在终端 ——
+   终端的字符网格不会因为中文而错位。
+
+   字符覆盖：
+     - 快乐体：GB2312 全量（6913 字），约 858 KB
+     - 小薇体：一级常用字（3894 字），约 1.4 MB
+
+   font-display: swap —— 字体没加载完时先用后备字体渲染，
+   不会出现空白文字。
+   ============================================================ */
+
+@font-face {
+  font-family: "Lshell Mono KuaiLe";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../assets/fonts/mono-cjk-kuaile.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Lshell Mono XiaoWei";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../assets/fonts/mono-cjk-xiaowei.woff2") format("woff2");
+}

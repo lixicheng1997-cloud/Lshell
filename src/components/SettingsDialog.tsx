@@ -1,4 +1,6 @@
 import {
+  createContext,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -33,7 +35,16 @@ import {
   type Settings,
   type SettingsKey,
 } from "../lib/settings";
-import { THEME_OPTIONS, resolveTheme, themeSwatches } from "../lib/app-themes";
+import {
+  THEME_OPTIONS,
+  parseThemeOpacity,
+  resolveTheme,
+  shapeOf,
+  themeArtwork,
+  themeOpacityKey,
+  themeSwatches,
+} from "../lib/app-themes";
+import { UI_FONT_OPTIONS } from "../lib/fonts";
 import Icon from "./Icon";
 
 type PageId =
@@ -71,11 +82,27 @@ interface PageProps {
 
 // ---------- 通用控件 ----------
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+/**
+ * 当前卡片标题。
+ *
+ * 行标签与卡片标题重复时（区块只有一行时最常见）自动省略标签列，
+ * 避免出现「主题与背景 → 主题 → 主题」这种层层重复的读法。
+ */
+const SectionTitleContext = createContext<string | null>(null);
+
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
   return (
-    <section className="settings-section">
-      <h3>{title}</h3>
-      {children}
+    <section className="settings-card">
+      <SectionTitleContext.Provider value={title}>
+        <h3 className="settings-card-title">{title}</h3>
+        <div className="settings-card-body">{children}</div>
+      </SectionTitleContext.Provider>
     </section>
   );
 }
@@ -84,14 +111,22 @@ function Row({
   label,
   desc,
   children,
+  block,
 }: {
   label: string;
   desc?: ReactNode;
   children: ReactNode;
+  /** 整行铺开：标签独占一行，控件占满宽度（用于主题网格这类宽内容） */
+  block?: boolean;
 }) {
+  const sectionTitle = useContext(SectionTitleContext);
+  // 标签与卡片标题重复时省略标签列，控件直接铺满
+  const hideLabel = sectionTitle === label;
   return (
-    <div className="settings-row">
-      <div className="label">{label}</div>
+    <div
+      className={`settings-row ${block ? "block" : ""} ${hideLabel ? "nolabel" : ""}`}
+    >
+      {hideLabel ? null : <div className="label">{label}</div>}
       <div className="control">{children}</div>
       {desc ? <div className="settings-desc">{desc}</div> : null}
     </div>
@@ -253,10 +288,22 @@ const FONT_OPTIONS: FontOption[] = [
   { label: "Ubuntu Mono", value: '"Ubuntu Mono", Consolas, monospace' },
   { label: "Menlo", value: "Menlo, Consolas, monospace" },
   { label: "Monaco", value: "Monaco, Consolas, monospace" },
+  // 内置等宽中文：中英 2:1 精确对齐，终端表格不会错位
+  {
+    label: "等宽可爱（快乐体）",
+    value: '"Lshell Mono KuaiLe", "ZCOOL KuaiLe", "Microsoft YaHei UI", monospace',
+  },
+  {
+    label: "等宽可爱（小薇体）",
+    value: '"Lshell Mono XiaoWei", "ZCOOL XiaoWei", "Microsoft YaHei UI", monospace',
+  },
   { label: "monospace（兜底）", value: "monospace" },
 ];
 
 const FONT_SAMPLE = "const $ ls -la";
+
+/** 界面字体预览文本：固定文案，且不能包含任何选项名，避免误选 */
+const UI_FONT_SAMPLE = "字体预览 Aa 123";
 
 function firstFamily(value: string): string {
   return value.split(",")[0]?.trim() || "monospace";
@@ -376,12 +423,163 @@ function FontSelect({
 // ---------- 主题下拉 ----------
 
 /**
- * 主题选择。
+ * 主题平铺选择。
  *
- * 每套主题同时决定应用界面与终端配色，所以这里只有一个控件；
- * 列表项用主题名 + 小色板预览，不再拆成「应用主题 / 终端配色」两处。
+ * 展示全部定制主题；每张卡片直接用主题插画或色板做预览，
+ * 点击即选中，不再需要展开下拉菜单。
  */
-function ThemeSelect({
+function ThemeGrid({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="theme-grid" role="radiogroup" aria-label="主题">
+      {THEME_OPTIONS.map((option) => {
+        const theme = resolveTheme(option.id);
+        const art = themeArtwork(theme);
+        const swatches = themeSwatches(theme);
+        const selected = option.id === value;
+        return (
+          <button
+            key={option.id}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            className={`theme-card ${selected ? "on" : ""}`}
+            onClick={() => onChange(option.id)}
+          >
+            <span
+              className="theme-card-preview"
+              style={
+                art
+                  ? {
+                      backgroundImage: `url("${art.src}")`,
+                      backgroundColor: swatches[0],
+                    }
+                  : {
+                      backgroundImage: `linear-gradient(135deg, ${swatches[0]} 0%, ${swatches[2]} 100%)`,
+                    }
+              }
+              aria-hidden
+            >
+              <span className="theme-card-swatches">
+                {swatches.map((color, index) => (
+                  <span key={index} style={{ background: color }} />
+                ))}
+              </span>
+            </span>
+            <span className="theme-card-label">
+              <span className="theme-card-name">{option.name}</span>
+              <span className="theme-badge">
+                {theme.mode === "light" ? "浅色" : "深色"}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------- 界面字体与主题插画 ----------
+
+/**
+ * 每套主题各自的浓度设置。
+ *
+ * 覆盖表以「族:深浅」为键，同一族的深浅主题互不干扰；
+ * 滑块直接显示当前主题的生效值（覆盖值优先，否则用主题自带值）。
+ */
+function ThemeOpacityRows({
+  draft,
+  onChange,
+}: {
+  draft: Settings;
+  onChange: (key: SettingsKey, value: string | number | boolean) => void;
+}) {
+  const theme = resolveTheme(draft.theme);
+  const key = themeOpacityKey(theme);
+  const table = parseThemeOpacity(draft.appearance.themeOpacity);
+  const override = table[key] ?? {};
+  const artwork = themeArtwork(theme);
+  const defaultArtwork = artwork?.opacity ?? 1;
+  const defaultPanel = shapeOf(theme).veil;
+
+  const write = (patch: { artwork?: number; panel?: number }) => {
+    const next = { ...table };
+    const merged = { ...override, ...patch };
+    // 数值与主题默认值相同时删掉该键，保持覆盖表干净
+    if (
+      merged.artwork === undefined ||
+      Math.abs(merged.artwork - defaultArtwork) < 0.001
+    ) {
+      delete merged.artwork;
+    }
+    if (
+      merged.panel === undefined ||
+      Math.abs(merged.panel - defaultPanel) < 0.001
+    ) {
+      delete merged.panel;
+    }
+    if (merged.artwork === undefined && merged.panel === undefined) {
+      delete next[key];
+    } else {
+      next[key] = merged;
+    }
+    onChange("appearance.themeOpacity", JSON.stringify(next));
+  };
+
+  return (
+    <>
+      <Row
+        label="插画浓度"
+        desc={`当前主题「${theme.name}」背景插画的浓度，数值越低插画越淡；每套主题单独记忆`}
+      >
+        <RangeInput
+          value={override.artwork ?? defaultArtwork}
+          min={0}
+          max={1}
+          step={0.05}
+          onChange={(v) => write({ artwork: v })}
+        />
+        <span className="settings-unit">
+          {Math.round((override.artwork ?? defaultArtwork) * 100)}%
+        </span>
+        {override.artwork === undefined ? (
+          <span className="settings-unit">默认</span>
+        ) : null}
+      </Row>
+      <Row
+        label="面板浓度"
+        desc={`背景上各面板的浓度，越不透明文字越清晰；每套主题单独记忆`}
+      >
+        <RangeInput
+          value={override.panel ?? defaultPanel}
+          min={0}
+          max={1}
+          step={0.05}
+          onChange={(v) => write({ panel: v })}
+        />
+        <span className="settings-unit">
+          {Math.round((override.panel ?? defaultPanel) * 100)}%
+        </span>
+        {override.panel === undefined ? (
+          <span className="settings-unit">默认</span>
+        ) : null}
+      </Row>
+    </>
+  );
+}
+
+/**
+ * 界面字体选择器。
+ *
+ * 用下拉卡片而不是原生 select：能直接预览字体效果，
+ * 也能标出「已内置 / 未安装」，避免选了却看不出变化。
+ */
+function UiFontSelect({
   value,
   onChange,
 }: {
@@ -400,61 +598,101 @@ function ThemeSelect({
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [open]);
 
-  const current = resolveTheme(value);
+  const current =
+    UI_FONT_OPTIONS.find((option) => option.id === value) ??
+    UI_FONT_OPTIONS[0];
 
   return (
-    <div className="theme-select" ref={rootRef}>
+    <div className="font-select" ref={rootRef}>
       <button
         type="button"
-        className="theme-trigger"
+        className="font-trigger"
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
       >
-        <span className="theme-swatches" aria-hidden>
-          {themeSwatches(current).map((color, index) => (
-            <span key={index} style={{ background: color }} />
-          ))}
+        <span className="font-trigger-name" style={{ fontFamily: current.stack }}>
+          {current.label}
         </span>
-        <span className="theme-trigger-name">{current.name}</span>
         <Icon name="chevron-down" size={12} />
       </button>
 
       {open && (
-        <div className="theme-menu" role="listbox">
-          {THEME_OPTIONS.map((option) => {
-            const theme = resolveTheme(option.id);
-            return (
-              <button
-                key={option.id}
-                type="button"
-                role="option"
-                aria-selected={option.id === value}
-                className={`theme-option ${option.id === value ? "on" : ""}`}
-                onClick={() => {
-                  onChange(option.id);
-                  setOpen(false);
-                }}
+        <div className="font-menu" role="listbox">
+          {UI_FONT_OPTIONS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              role="option"
+              aria-selected={option.id === value}
+              className={`font-option ${option.id === value ? "on" : ""}`}
+              onClick={() => {
+                onChange(option.id);
+                setOpen(false);
+              }}
+            >
+              <span className="font-option-main">
+                <span className="font-option-name">{option.label}</span>
+                {option.bundled ? (
+                  <span className="font-badge">已内置</span>
+                ) : null}
+              </span>
+              <span
+                className="font-option-sample"
+                style={{ fontFamily: option.stack }}
               >
-                <span className="theme-swatches" aria-hidden>
-                  {themeSwatches(theme).map((color, index) => (
-                    <span key={index} style={{ background: color }} />
-                  ))}
-                </span>
-                <span className="theme-option-name">{option.name}</span>
-                <span className="theme-badge">
-                  {option.id === "system"
-                    ? "随系统"
-                    : theme.mode === "light"
-                      ? "浅色"
-                      : "深色"}
-                </span>
-              </button>
-            );
-          })}
+                {UI_FONT_SAMPLE}
+              </span>
+            </button>
+          ))}
         </div>
       )}
     </div>
+  );
+}
+
+function AppearanceExtras({
+  draft,
+  onChange,
+}: {
+  draft: Settings;
+  onChange: (key: SettingsKey, value: string | number | boolean) => void;
+}) {
+  const { fontMode, uiFont, artworkEnabled } = draft.appearance;
+  return (
+    <Section title="界面字体与插画">
+      <Row label="字体模式" desc="跟随主题时使用主题推荐字体；手动指定可覆盖">
+        <Segmented<"theme" | "custom">
+          value={fontMode}
+          options={[
+            { value: "theme", label: "跟随主题" },
+            { value: "custom", label: "手动指定" },
+          ]}
+          onChange={(v) => onChange("appearance.fontMode", v)}
+        />
+      </Row>
+      {fontMode === "custom" ? (
+        <Row
+          label="字体选择"
+          desc={
+            UI_FONT_OPTIONS.find((option) => option.id === uiFont)?.note ??
+            "未安装的字体自动回落，不影响界面可读性"
+          }
+        >
+          <UiFontSelect
+            value={uiFont}
+            onChange={(v) => onChange("appearance.uiFont", v)}
+          />
+        </Row>
+      ) : null}
+      <Row label="主题插画" desc="部分主题自带背景插画；用户自定义背景图始终优先">
+        <Toggle
+          checked={artworkEnabled}
+          onChange={(v) => onChange("appearance.artworkEnabled", v)}
+        />
+      </Row>
+      <ThemeOpacityRows draft={draft} onChange={onChange} />
+    </Section>
   );
 }
 
@@ -578,19 +816,21 @@ function AppearancePage({
     <>
       <Section title="主题">
         <Row
+          block
           label="主题"
           desc="一套主题同时定义界面色板与终端 ANSI 配色，保存后应用到整个界面。"
         >
-          <ThemeSelect
+          <ThemeGrid
             value={draft.theme}
             onChange={(v) => onChange("theme", v)}
           />
         </Row>
         <div className="settings-note">
-          「跟随系统」只在默认深色与默认浅色之间随系统切换，不会改变其他具体主题；
-          选择具体主题名后深浅固定，不再跟随系统。
+          每套主题同时决定界面与终端配色，并可单独调节背景插画与面板浓度。
         </div>
       </Section>
+
+      <AppearanceExtras draft={draft} onChange={onChange} />
 
       <Section title="背景图">
         <BackgroundImageRow
@@ -637,8 +877,8 @@ function AppearancePage({
           </span>
         </Row>
         {!hasBackground && (
-          <div className="settings-desc settings-bg-hint">
-            未选择背景图时以上参数不生效，界面使用主题纯色背景。
+          <div className="settings-hint">
+            未选择背景图时以上参数不生效；若当前主题自带插画仍会显示，可在上方关闭。
           </div>
         )}
       </Section>
@@ -658,6 +898,10 @@ function AppearancePage({
       <ResetButton
         keys={[
           "theme",
+          "appearance.uiFont",
+          "appearance.fontMode",
+          "appearance.artworkEnabled",
+          "appearance.themeOpacity",
           "terminal.backgroundImage",
           "terminal.backgroundOpacity",
           "terminal.backgroundFit",
@@ -679,6 +923,15 @@ function TerminalPage({ draft, onChange, onReset }: PageProps) {
           <FontSelect
             value={draft.terminal.fontFamily}
             onChange={(v) => onChange("terminal.fontFamily", v)}
+          />
+        </Row>
+        <Row
+          label="跟随界面字体"
+          desc="开启后终端直接使用界面所选的字体；内置等宽中文字体中英 2:1 对齐，表格不会错位"
+        >
+          <Toggle
+            checked={draft.terminal.fontFollowsUi}
+            onChange={(v) => onChange("terminal.fontFollowsUi", v)}
           />
         </Row>
         <Row
@@ -740,6 +993,7 @@ function TerminalPage({ draft, onChange, onReset }: PageProps) {
       <ResetButton
         keys={[
           "terminal.fontFamily",
+          "terminal.fontFollowsUi",
           "terminal.fontSize",
           "terminal.cursorStyle",
           "terminal.cursorBlink",
@@ -1218,8 +1472,6 @@ export default function SettingsDialog({
     }
   };
 
-  const title = PAGES.find((p) => p.id === page)?.title ?? "";
-
   const pageProps: PageProps = {
     draft,
     onChange,
@@ -1300,15 +1552,12 @@ export default function SettingsDialog({
           </nav>
 
           <div className="settings-content">
-            <div className="settings-page">
-              <h2 className="settings-title">{title}</h2>
-              {renderPage()}
-            </div>
+            <div className="settings-page">{renderPage()}</div>
           </div>
         </div>
 
         <footer>
-          <button type="button" className="btn" onClick={requestClose}>
+          <button type="button" className="btn outline" onClick={requestClose}>
             关闭
           </button>
           <button

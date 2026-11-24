@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod commands;
 pub mod db;
 pub mod dpapi;
+pub mod editor;
 pub mod error;
 pub mod importer;
 pub mod models;
@@ -200,8 +201,14 @@ pub fn run() {
             commands::sftp_download,
             commands::sftp_upload,
             commands::sftp_mkdir,
+            commands::sftp_touch,
             commands::sftp_remove,
             commands::sftp_rename,
+            commands::editor_open,
+            commands::editor_save,
+            commands::editor_list_backups,
+            commands::editor_restore,
+            commands::editor_audit_list,
             commands::list_transfers,
             commands::cancel_transfer,
             commands::forward_start,

@@ -59,6 +59,10 @@ aes-gcm = { version = "0.11", features = ["getrandom"] }
 rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 
+# 远程文件编辑：基线哈希与读取方向的 base64 内容封装（纯 Rust，无 C 依赖）
+sha2 = "0.10"
+base64 = "0.22"
+
 thiserror = "2"
 anyhow = "1"
 log = "0.4"
