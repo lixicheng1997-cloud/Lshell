@@ -1,0 +1,110 @@
+/* ============================================================
+   Lshell 官网 —— 奶油浅色系 Design Tokens
+   ------------------------------------------------------------
+   基调取自应用内的「云朵棉花糖 · 日云」主题：
+   淡紫渐层 + 奶油白底 + 蜜桃 / 薄荷点缀。
+   所有颜色、圆角、阴影、动效曲线集中在此，主题切换只改这里。
+   ============================================================ */
+
+:root {
+  /* ---------- 底层与表面 ---------- */
+  --bg: #fffdf9;
+  --bg-tint: #f7f3ff;
+  --bg-tint-deep: #efe8fc;
+  --surface: #ffffff;
+  --surface-soft: #fdfbff;
+  --panel: #f3eefc;
+  --sunken: #f2eef8;
+
+  /* ---------- 文字 ---------- */
+  --fg: #3b3358;
+  --fg-strong: #241d3d;
+  --fg-muted: #6b6288;
+  --fg-faint: #9a93b4;
+  --fg-on-accent: #ffffff;
+
+  /* ---------- 主色：云朵紫 ---------- */
+  --accent: #7b61d1;
+  --accent-hover: #6a51bd;
+  --accent-press: #5b46a4;
+  --accent-soft: #efe9fd;
+  --accent-line: rgba(123, 97, 209, 0.26);
+  --accent-glow: rgba(123, 97, 209, 0.22);
+  --accent-ink: #4d3a92;
+
+  /* ---------- 点缀色 ---------- */
+  --peach: #ef9078;
+  --peach-soft: #ffece5;
+  --peach-ink: #c2593f;
+  --mint: #46b394;
+  --mint-soft: #e2f6ee;
+  --mint-ink: #2c7a63;
+  --sun: #f5c451;
+  --sun-soft: #fff5da;
+  --rose: #e87b9e;
+  --rose-soft: #fdeaf0;
+
+  /* ---------- 状态色 ---------- */
+  --ok: #3e9e79;
+  --ok-soft: #e3f5ee;
+  --warn: #b77a24;
+  --warn-soft: #fbf0dc;
+  --err: #c94f6a;
+  --err-soft: #fdecef;
+
+  /* ---------- 线条 ---------- */
+  --line: #ece6f7;
+  --line-faint: #f4f0fb;
+  --line-strong: #ded5f0;
+
+  /* ---------- 圆角 ---------- */
+  --r-xs: 8px;
+  --r-sm: 12px;
+  --r-md: 16px;
+  --r-lg: 22px;
+  --r-xl: 30px;
+  --r-pill: 999px;
+
+  /* ---------- 阴影 ---------- */
+  --shadow-xs: 0 1px 2px rgba(59, 51, 88, 0.05);
+  --shadow-sm: 0 2px 8px rgba(59, 51, 88, 0.06);
+  --shadow-md: 0 8px 24px -8px rgba(59, 51, 88, 0.12);
+  --shadow-lg: 0 18px 48px -16px rgba(59, 51, 88, 0.16);
+  --shadow-xl: 0 32px 80px -24px rgba(59, 51, 88, 0.2);
+  --shadow-accent: 0 8px 24px -10px var(--accent-glow);
+
+  /* ---------- 字体 ----------
+     正文用系统无衬线字体：内置的等宽手写体适合做标题与点缀，
+     但用它排正文会因字宽固定而显得松散，长句可读性下降。
+     标题层用内置手写体（圆润可爱），正文层用系统字体（清晰易读）。 */
+  --font-ui: "Segoe UI Variable Text", -apple-system, "Segoe UI",
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-display: "Lshell Mono KuaiLe", "Segoe UI Variable Text", -apple-system,
+    "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  --font-serif: "Lshell Mono XiaoWei", "Segoe UI Variable Text", -apple-system,
+    "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", "JetBrains Mono",
+    ui-monospace, Consolas, "Courier New", monospace;
+
+  /* ---------- 动效 ---------- */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-bounce: cubic-bezier(0.34, 1.36, 0.64, 1);
+  --dur-fast: 0.16s;
+  --dur: 0.28s;
+  --dur-slow: 0.5s;
+
+  /* ---------- 布局 ---------- */
+  --wrap: 1160px;
+  --nav-h: 66px;
+  --gap: 24px;
+}
+
+/* 降低动效偏好：关闭所有过渡与动画 */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0.01ms;
+    --dur: 0.01ms;
+    --dur-slow: 0.01ms;
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "lshell-website",
+  "version": "1.3.0",
+  "private": true,
+  "description": "Lshell 官网 —— 静态站 + 自建计数服务（Node 内置模块，零依赖）",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node --watch server/server.js",
+    "stats": "node server/stats-cli.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

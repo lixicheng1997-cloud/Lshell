@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lshell — 轻量级 Windows SSH 客户端</title>
+<meta name="description" content="Lshell：轻量级 Windows SSH 客户端。安装包仅 2.7 MB，完全离线，无遥测。主机管理、多标签终端、SFTP、端口转发。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230B0D11'/%3E%3Cpath d='M18 14h11v28h17v9H18z' fill='%237C8CFF'/%3E%3C/svg%3E">
+<style>
+/* ============================================================
+   Lshell 官网 —— 「深空靛紫」Kinetic Minimal
+   色彩与排版 token 与应用内 tokens.css 同源
+   ============================================================ */
+:root {
+  --bg-app:    #0B0D11;
+  --bg-panel:  #101319;
+  --bg-surface:#161A21;
+  --bg-raised: #1D222B;
+  --bg-hover:  #1F2530;
+  --line-faint:#1A1F27;
+  --line:      #262C37;
+  --line-strong:#343C4A;
+  --fg:        #E6E9F0;
+  --fg-muted:  #98A1B2;
+  --fg-faint:  #626B7C;
+  --accent:    #7C8CFF;
+  --accent-hover: #97A4FF;
+  --accent-press: #6273F5;
+  --accent-dim: rgba(124,140,255,.14);
+  --accent-line: rgba(124,140,255,.34);
+  --accent-glow: rgba(124,140,255,.42);
+  --ok:   #35D6A4;
+  --warn: #F0B429;
+  --term-green: #7EE787;
+  --term-blue:  #79B8FF;
+  --term-yellow:#F2CC60;
+  --term-cyan:  #56D4DD;
+  --term-red:   #FF7B72;
+  --font-ui: "Segoe UI Variable Text", -apple-system, "Segoe UI",
+             "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", "JetBrains Mono",
+               ui-monospace, Consolas, "Courier New", monospace;
+  --ease: cubic-bezier(.4, 0, .2, 1);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; overflow-x: clip; }
+body {
+  font-family: var(--font-ui);
+  background: var(--bg-app);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: clip;
+}
+a { color: inherit; text-decoration: none; }
+svg { display: block; }
+
+/* ---------- 通用 ---------- */
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--fg-muted);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 5px 12px; letter-spacing: .02em;
+}
+.chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-family: inherit; font-size: 14.5px; font-weight: 600;
+  border-radius: 10px; padding: 13px 22px;
+  transition: background .15s var(--ease), border-color .15s var(--ease), transform .15s var(--ease);
+  cursor: pointer; white-space: nowrap;
+}
+.btn-primary {
+  background: var(--accent); color: #0B0D11;
+  box-shadow: 0 4px 18px -6px var(--accent-glow);
+}
+.btn-primary:hover { background: var(--accent-hover); transform: translateY(-1px); }
+.btn-primary:active { background: var(--accent-press); transform: none; }
+.btn-primary .btn-meta { font-weight: 500; opacity: .72; font-size: 13px; }
+.btn-ghost {
+  background: transparent; color: var(--fg);
+  border: 1px solid var(--line-strong);
+}
+.btn-ghost:hover { background: var(--bg-hover); border-color: var(--accent-line); }
+.btn-ghost .btn-meta { color: var(--fg-muted); font-weight: 500; font-size: 13px; }
+
+/* ---------- 导航 ---------- */
+.nav {
+  position: sticky; top: 0; z-index: 50;
+  background: rgba(11,13,17,.78);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line-faint);
+}
+.nav-inner {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 60px;
+}
+.nav .brand svg { height: 18px; width: auto; }
+.nav-links { display: flex; align-items: center; gap: 20px; }
+.nav-links a.nav-item {
+  font-size: 13.5px; color: var(--fg-muted);
+  display: inline-flex; align-items: center; gap: 7px;
+  transition: color .15s var(--ease);
+}
+.nav-links a.nav-item:hover { color: var(--fg); }
+.btn-nav {
+  background: var(--accent); color: #0B0D11;
+  font-size: 13px; font-weight: 600;
+  border-radius: 8px; padding: 8px 16px;
+  transition: background .15s var(--ease);
+}
+.btn-nav:hover { background: var(--accent-hover); }
+
+/* ---------- Hero ---------- */
+.hero { position: relative; padding: 96px 0 0; text-align: center; }
+.hero-bg {
+  position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+}
+.hero-bg::before {
+  content: ""; position: absolute; left: 50%; top: -140px;
+  width: min(900px, 100vw); height: 620px; transform: translateX(-50%);
+  background: radial-gradient(closest-side, rgba(124,140,255,.13), transparent 70%);
+}
+.hero-bg::after {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(var(--line-faint) 1px, transparent 1px) 0 0 / 100% 56px,
+    linear-gradient(90deg, var(--line-faint) 1px, transparent 1px) 0 0 / 56px 100%;
+  opacity: .35;
+  mask-image: radial-gradient(ellipse 70% 55% at 50% 0%, #000 20%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 55% at 50% 0%, #000 20%, transparent 75%);
+}
+.hero > .wrap { position: relative; }
+.hero-badge { margin-bottom: 26px; }
+.hero h1 { display: flex; justify-content: center; }
+.hero h1 svg { height: clamp(40px, 7vw, 64px); width: auto; }
+.hero-tag {
+  margin: 22px auto 0; max-width: 560px;
+  font-size: clamp(16px, 2.4vw, 19px); line-height: 1.6;
+  color: var(--fg-muted); font-weight: 400;
+}
+.hero-tag strong { color: var(--fg); font-weight: 600; }
+.hero-ctas {
+  margin-top: 36px;
+  display: flex; gap: 14px; justify-content: center; flex-wrap: wrap;
+}
+.hero-note {
+  margin-top: 18px; font-size: 12.5px; color: var(--fg-faint);
+  font-family: var(--font-mono);
+}
+.hero-note a { color: var(--fg-muted); border-bottom: 1px solid var(--line-strong); }
+.hero-note a:hover { color: var(--accent); border-color: var(--accent-line); }
+
+/* ---------- 原型窗口 ---------- */
+.stage {
+  position: relative; margin: 64px auto 0; max-width: 1060px; padding: 0 24px;
+}
+.stage::before {
+  content: ""; position: absolute; left: 50%; bottom: -40px;
+  width: min(760px, 100vw); height: 300px; transform: translateX(-50%);
+  background: radial-gradient(closest-side, var(--accent-glow), transparent 72%);
+  opacity: .16; pointer-events: none;
+}
+.app {
+  position: relative;
+  background: var(--bg-app);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 1px 0 rgba(255,255,255,.04) inset,
+              0 40px 110px -30px rgba(0,0,0,.92),
+              0 0 90px -30px var(--accent-glow);
+  overflow: hidden;
+  text-align: left;
+  display: flex; flex-direction: column;
+  height: 600px;
+  font-size: 12px;
+}
+/* 标题栏 */
+.tb {
+  height: 40px; flex: none;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line-faint);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 14px 0 14px;
+}
+.tb .tb-brand { display: flex; align-items: center; gap: 9px; }
+.tb .tb-brand svg { height: 12px; width: auto; }
+.tb .win-controls { display: flex; gap: 8px; }
+.tb .win-controls i {
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--line-strong);
+}
+.tb .win-controls i:nth-child(3) { background: var(--err); opacity: .85; }
+/* 顶栏 */
+.top {
+  height: 46px; flex: none;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line-faint);
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 12px;
+}
+.top .search {
+  flex: 1; max-width: 300px;
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg-surface); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 10px;
+  color: var(--fg-faint); font-size: 12px;
+}
+.top .search kbd {
+  margin-left: auto; font-family: var(--font-mono); font-size: 10px;
+  color: var(--fg-faint); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 5px;
+}
+.top .spacer { flex: 1; }
+.top .ico {
+  width: 30px; height: 30px; border-radius: 7px;
+  display: grid; place-items: center;
+  color: var(--fg-muted); border: 1px solid transparent;
+}
+.top .ico:hover { background: var(--bg-hover); }
+.top .new {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent); color: #0B0D11;
+  font-weight: 600; font-size: 12px;
+  border-radius: 8px; padding: 6px 12px;
+}
+/* 主体三栏 */
+.main { flex: 1; display: flex; min-height: 0; }
+/* 侧栏 */
+.side {
+  width: 216px; flex: none;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--line-faint);
+  padding: 12px 10px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.side .grp {
+  font-size: 10px; font-weight: 700; letter-spacing: .12em;
+  color: var(--fg-faint); padding: 8px 8px 4px;
+}
+.side .row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 7px;
+  color: var(--fg-muted); font-size: 12.5px;
+}
+.side .row .st { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.side .row .st.on { background: var(--ok); box-shadow: 0 0 6px rgba(53,214,164,.5); }
+.side .row .st.idle { background: var(--fg-faint); }
+.side .row .st.warn { background: var(--warn); }
+.side .row.active {
+  background: var(--accent-dim); color: var(--fg);
+  outline: 1px solid var(--accent-line);
+}
+.side .row.active .st.on { box-shadow: 0 0 8px rgba(124,140,255,.6); background: var(--accent); }
+.side .tags { margin-top: auto; display: flex; gap: 6px; flex-wrap: wrap; padding: 8px; }
+.side .tag {
+  font-size: 10.5px; color: var(--fg-muted);
+  border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px;
+}
+/* 右侧工作区 */
+.work { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.tabs {
+  height: 38px; flex: none;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line-faint);
+  display: flex; align-items: stretch;
+}
+.tab {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 16px; font-size: 12.5px; color: var(--fg-faint);
+  border-right: 1px solid var(--line-faint);
+  position: relative;
+}
+.tab .st { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.tab.active { color: var(--fg); background: var(--bg-app); }
+.tab.active::after {
+  content: ""; position: absolute; left: 0; right: 0; top: -1px; height: 2px;
+  background: var(--accent);
+}
+.term-wrap { flex: 1; min-height: 0; display: flex; }
+.term {
+  flex: 1; min-width: 0;
+  background: var(--bg-app);
+  padding: 14px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px; line-height: 1.75;
+  color: #C9D1DE;
+  overflow: hidden;
+}
+.term .p-user { color: var(--term-green); }
+.term .p-at { color: var(--fg-muted); }
+.term .p-host { color: var(--term-blue); }
+.term .p-path { color: var(--term-magenta, #D2A8FF); }
+.term .cmd { color: #E6E9F0; }
+.term .dim { color: var(--fg-faint); }
+.term .ok { color: var(--term-green); }
+.term .cy { color: var(--term-cyan); }
+.term .yl { color: var(--term-yellow); }
+.cursor {
+  display: inline-block; width: 8px; height: 15px;
+  background: var(--accent); vertical-align: -2px;
+  animation: blink 1.1s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+/* SFTP 抽屉 */
+.sftp {
+  width: 218px; flex: none;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--line-faint);
+  display: flex; flex-direction: column;
+}
+.sftp .sftp-head {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-faint);
+  font-size: 10px; font-weight: 700; letter-spacing: .12em;
+  color: var(--fg-faint);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.sftp .sftp-head .follow {
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0;
+  color: var(--accent); background: var(--accent-dim);
+  border-radius: 999px; padding: 2px 8px;
+}
+.sftp .cwd {
+  padding: 8px 12px; font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--fg-muted); border-bottom: 1px solid var(--line-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sftp .frow {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 12px; font-size: 12px; color: var(--fg-muted);
+}
+.sftp .frow:hover { background: var(--bg-hover); }
+.sftp .frow svg { width: 14px; height: 14px; flex: none; opacity: .75; }
+.sftp .frow .sz { margin-left: auto; font-size: 10.5px; color: var(--fg-faint); font-family: var(--font-mono); }
+/* 状态栏 */
+.status {
+  height: 28px; flex: none;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--line-faint);
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 14px;
+  font-size: 11px; color: var(--fg-muted);
+}
+.status .st { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 6px rgba(53,214,164,.5); }
+.status .lat { color: var(--ok); font-family: var(--font-mono); font-size: 10.5px; }
+.status .right { margin-left: auto; display: flex; gap: 14px; color: var(--fg-faint); font-family: var(--font-mono); font-size: 10.5px; }
+
+/* ---------- 特性 ---------- */
+.features { padding: 120px 0 0; }
+.sec-head { text-align: center; margin-bottom: 48px; }
+.sec-head h2 { font-size: clamp(22px, 3.4vw, 30px); font-weight: 700; letter-spacing: -.01em; }
+.sec-head p { margin-top: 12px; color: var(--fg-muted); font-size: 15px; }
+.feat-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
+  background: var(--line-faint);
+  border: 1px solid var(--line-faint);
+  border-radius: 16px; overflow: hidden;
+}
+.feat {
+  background: var(--bg-app);
+  padding: 28px 26px;
+  transition: background .2s var(--ease);
+}
+.feat:hover { background: var(--bg-panel); }
+.feat .fi {
+  width: 38px; height: 38px; border-radius: 10px;
+  background: var(--accent-dim); border: 1px solid var(--accent-line);
+  display: grid; place-items: center; margin-bottom: 16px;
+  color: var(--accent);
+}
+.feat h3 { font-size: 15px; font-weight: 600; }
+.feat p { margin-top: 6px; font-size: 13px; color: var(--fg-muted); }
+.feat p code { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
+
+/* ---------- 版本更新 ---------- */
+.changelog { padding: 120px 0 0; }
+.log-list { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
+.log-item {
+  background: var(--bg-panel); border: 1px solid var(--line);
+  border-radius: 14px; padding: 22px 26px;
+  transition: border-color .15s var(--ease);
+}
+.log-item:hover { border-color: var(--accent-line); }
+.log-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.log-ver { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--accent); }
+.log-tag {
+  font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px;
+  background: var(--accent-dim); color: var(--accent); border: 1px solid var(--accent-line);
+}
+.log-date { margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--fg-faint); }
+.log-item ul { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.log-item li { font-size: 13.5px; color: var(--fg-muted); padding-left: 18px; position: relative; line-height: 1.65; }
+.log-item li::before { content: ""; position: absolute; left: 2px; top: 9px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-line); }
+.log-item li strong { color: var(--fg); font-weight: 600; }
+.log-item li code { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
+
+/* ---------- 尾部 CTA ---------- */
+.final { padding: 130px 0 0; text-align: center; position: relative; }
+.final h2 { font-size: clamp(24px, 3.6vw, 34px); font-weight: 700; letter-spacing: -.01em; }
+.final .sub { margin-top: 14px; color: var(--fg-muted); font-size: 15px; font-family: var(--font-mono); }
+.final .hero-ctas { margin-top: 32px; }
+
+/* ---------- 页脚 ---------- */
+footer {
+  margin-top: 110px; padding: 28px 0;
+  border-top: 1px solid var(--line-faint);
+}
+.foot-inner {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+}
+.foot-left { display: flex; align-items: center; gap: 14px; }
+.foot-left svg { height: 14px; width: auto; }
+.foot-left span { font-size: 12.5px; color: var(--fg-faint); }
+.foot-links { display: flex; gap: 20px; }
+.foot-links a { font-size: 12.5px; color: var(--fg-muted); transition: color .15s var(--ease); }
+.foot-links a:hover { color: var(--accent); }
+
+/* ---------- 入场动效（CSS only，JS 关闭时依然可见） ---------- */
+@media (prefers-reduced-motion: no-preference) {
+  .up { opacity: 0; transform: translateY(18px); animation: rise .7s var(--ease) forwards; }
+  .d1 { animation-delay: .05s; } .d2 { animation-delay: .15s; }
+  .d3 { animation-delay: .25s; } .d4 { animation-delay: .35s; }
+  .d5 { animation-delay: .5s; }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 900px) {
+  .side, .sftp { display: none; }
+  .app { height: 480px; }
+  .feat-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 560px) {
+  .hero { padding-top: 64px; }
+  .hero-ctas .btn { width: 100%; justify-content: center; }
+  .feat-grid { grid-template-columns: 1fr; }
+  .top .search { display: none; }
+  .app { height: 420px; font-size: 11px; }
+  .term { font-size: 10.5px; padding: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .cursor { animation: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ===== 导航 ===== -->
+<nav class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#" aria-label="Lshell 首页">
+      <svg viewBox="0 0 2646.21 751.95" role="img" aria-label="Lshell">
+        <g fill="#7C8CFF"><path d="M387.7 740.23L0 740.23L0 40.04L116.21 40.04L116.21 642.09L387.7 642.09Z"/><rect x="2470.21" y="300.23" width="176" height="440" rx="24.64"/></g>
+        <g fill="#E6E9F0"><path d="M435.06 724.61L435.06 619.63Q498.54 667.97 575.2 667.97Q677.73 667.97 677.73 607.42Q677.73 590.33 668.95 578.37Q660.16 566.41 645.26 557.13Q630.37 547.85 610.11 540.53Q589.84 533.2 564.94 523.93Q534.18 511.72 509.52 498.05Q484.86 484.38 468.51 467.04Q452.15 449.71 443.85 427.73Q435.55 405.76 435.55 376.46Q435.55 340.33 452.64 312.74Q469.73 285.16 498.54 266.36Q527.34 247.56 563.96 238.04Q600.59 228.52 639.65 228.52Q708.98 228.52 763.67 249.51L763.67 348.63Q710.94 312.5 642.58 312.5Q621.09 312.5 603.76 316.89Q586.43 321.29 574.22 329.1Q562.01 336.91 555.18 347.9Q548.34 358.89 548.34 372.07Q548.34 388.18 555.18 399.41Q562.01 410.64 575.44 419.19Q588.87 427.73 607.67 434.81Q626.46 441.89 650.88 450.2Q683.11 463.38 708.74 477.05Q734.38 490.72 752.44 508.06Q770.51 525.39 780.27 548.1Q790.04 570.8 790.04 602.05Q790.04 640.14 772.46 668.46Q754.88 696.78 725.59 715.33Q696.29 733.89 657.96 742.92Q619.63 751.95 577.15 751.95Q495.12 751.95 435.06 724.61ZM1337.89 740.23L1224.61 740.23L1224.61 466.8Q1224.61 318.36 1125.49 318.36Q1075.68 318.36 1041.5 361.33Q1007.32 404.3 1007.32 471.19L1007.32 740.23L893.55 740.23L893.55 0L1007.32 0L1007.32 323.24L1009.28 323.24Q1065.92 228.52 1171.39 228.52Q1337.89 228.52 1337.89 432.13ZM1895.02 521L1554.2 521Q1556.15 590.33 1596.92 627.93Q1637.7 665.53 1708.98 665.53Q1789.06 665.53 1855.96 617.68L1855.96 708.98Q1787.6 751.95 1675.29 751.95Q1564.94 751.95 1502.2 683.84Q1439.45 615.72 1439.45 492.19Q1439.45 375.49 1508.54 302Q1577.64 228.52 1680.18 228.52Q1782.71 228.52 1838.87 294.43Q1895.02 360.35 1895.02 477.54ZM1785.64 440.92Q1785.16 379.88 1756.84 345.95Q1728.52 312.01 1678.71 312.01Q1629.88 312.01 1595.95 347.66Q1562.01 383.3 1554.2 440.92ZM2112.79 740.23L1999.02 740.23L1999.02 0L2112.79 0ZM2370.12 740.23L2256.35 740.23L2256.35 0L2370.12 0Z"/></g>
+      </svg>
+    </a>
+    <div class="nav-links">
+      <a class="btn-nav" href="#changelog">更新日志</a>
+      <a class="btn-nav" href="#download">下载</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ===== Hero ===== -->
+<header class="hero">
+  <div class="hero-bg" aria-hidden="true"></div>
+  <div class="wrap">
+    <div class="hero-badge up d1">
+      <span class="chip"><span class="dot"></span>v1.0.0 · Windows x64 · Apache-2.0</span>
+    </div>
+    <h1 class="up d2" aria-label="Lshell">
+      <svg viewBox="0 0 2646.21 751.95" role="img" aria-hidden="true">
+        <g fill="#7C8CFF"><path d="M387.7 740.23L0 740.23L0 40.04L116.21 40.04L116.21 642.09L387.7 642.09Z"/><rect x="2470.21" y="300.23" width="176" height="440" rx="24.64"/></g>
+        <g fill="#E6E9F0"><path d="M435.06 724.61L435.06 619.63Q498.54 667.97 575.2 667.97Q677.73 667.97 677.73 607.42Q677.73 590.33 668.95 578.37Q660.16 566.41 645.26 557.13Q630.37 547.85 610.11 540.53Q589.84 533.2 564.94 523.93Q534.18 511.72 509.52 498.05Q484.86 484.38 468.51 467.04Q452.15 449.71 443.85 427.73Q435.55 405.76 435.55 376.46Q435.55 340.33 452.64 312.74Q469.73 285.16 498.54 266.36Q527.34 247.56 563.96 238.04Q600.59 228.52 639.65 228.52Q708.98 228.52 763.67 249.51L763.67 348.63Q710.94 312.5 642.58 312.5Q621.09 312.5 603.76 316.89Q586.43 321.29 574.22 329.1Q562.01 336.91 555.18 347.9Q548.34 358.89 548.34 372.07Q548.34 388.18 555.18 399.41Q562.01 410.64 575.44 419.19Q588.87 427.73 607.67 434.81Q626.46 441.89 650.88 450.2Q683.11 463.38 708.74 477.05Q734.38 490.72 752.44 508.06Q770.51 525.39 780.27 548.1Q790.04 570.8 790.04 602.05Q790.04 640.14 772.46 668.46Q754.88 696.78 725.59 715.33Q696.29 733.89 657.96 742.92Q619.63 751.95 577.15 751.95Q495.12 751.95 435.06 724.61ZM1337.89 740.23L1224.61 740.23L1224.61 466.8Q1224.61 318.36 1125.49 318.36Q1075.68 318.36 1041.5 361.33Q1007.32 404.3 1007.32 471.19L1007.32 740.23L893.55 740.23L893.55 0L1007.32 0L1007.32 323.24L1009.28 323.24Q1065.92 228.52 1171.39 228.52Q1337.89 228.52 1337.89 432.13ZM1895.02 521L1554.2 521Q1556.15 590.33 1596.92 627.93Q1637.7 665.53 1708.98 665.53Q1789.06 665.53 1855.96 617.68L1855.96 708.98Q1787.6 751.95 1675.29 751.95Q1564.94 751.95 1502.2 683.84Q1439.45 615.72 1439.45 492.19Q1439.45 375.49 1508.54 302Q1577.64 228.52 1680.18 228.52Q1782.71 228.52 1838.87 294.43Q1895.02 360.35 1895.02 477.54ZM1785.64 440.92Q1785.16 379.88 1756.84 345.95Q1728.52 312.01 1678.71 312.01Q1629.88 312.01 1595.95 347.66Q1562.01 383.3 1554.2 440.92ZM2112.79 740.23L1999.02 740.23L1999.02 0L2112.79 0ZM2370.12 740.23L2256.35 740.23L2256.35 0L2370.12 0Z"/></g>
+      </svg>
+    </h1>
+    <p class="hero-tag up d3">轻量级 Windows SSH 客户端。<strong>2.7 MB</strong>，完全离线，无遥测，开箱即用。</p>
+    <div class="hero-ctas up d4" id="download">
+      <a class="btn btn-primary" href="downloads/Lshell_1.0.0_x64-setup.exe" download>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
+        下载安装包 <span class="btn-meta">.exe · 2.7 MB</span>
+      </a>
+      <a class="btn btn-ghost" href="downloads/Lshell_1.0.0_x64_en-US.msi" download>
+        MSI 安装包 <span class="btn-meta">4.5 MB · 企业部署</span>
+      </a>
+    </div>
+    <p class="hero-note up d5">Windows 10 / 11 · x64 · 无需管理员权限</p>
+  </div>
+
+  <!-- ===== 产品原型 ===== -->
+  <div class="stage up d5" aria-label="Lshell 应用界面原型">
+    <div class="app" role="img" aria-label="Lshell 主界面：左侧主机库，中间多标签终端，右侧 SFTP 文件面板">
+
+      <!-- 标题栏 -->
+      <div class="tb">
+        <div class="tb-brand">
+          <svg viewBox="0 0 2646.21 751.95" aria-hidden="true">
+            <g fill="#7C8CFF"><path d="M387.7 740.23L0 740.23L0 40.04L116.21 40.04L116.21 642.09L387.7 642.09Z"/><rect x="2470.21" y="300.23" width="176" height="440" rx="24.64"/></g>
+            <g fill="#E6E9F0"><path d="M435.06 724.61L435.06 619.63Q498.54 667.97 575.2 667.97Q677.73 667.97 677.73 607.42Q677.73 590.33 668.95 578.37Q660.16 566.41 645.26 557.13Q630.37 547.85 610.11 540.53Q589.84 533.2 564.94 523.93Q534.18 511.72 509.52 498.05Q484.86 484.38 468.51 467.04Q452.15 449.71 443.85 427.73Q435.55 405.76 435.55 376.46Q435.55 340.33 452.64 312.74Q469.73 285.16 498.54 266.36Q527.34 247.56 563.96 238.04Q600.59 228.52 639.65 228.52Q708.98 228.52 763.67 249.51L763.67 348.63Q710.94 312.5 642.58 312.5Q621.09 312.5 603.76 316.89Q586.43 321.29 574.22 329.1Q562.01 336.91 555.18 347.9Q548.34 358.89 548.34 372.07Q548.34 388.18 555.18 399.41Q562.01 410.64 575.44 419.19Q588.87 427.73 607.67 434.81Q626.46 441.89 650.88 450.2Q683.11 463.38 708.74 477.05Q734.38 490.72 752.44 508.06Q770.51 525.39 780.27 548.1Q790.04 570.8 790.04 602.05Q790.04 640.14 772.46 668.46Q754.88 696.78 725.59 715.33Q696.29 733.89 657.96 742.92Q619.63 751.95 577.15 751.95Q495.12 751.95 435.06 724.61ZM1337.89 740.23L1224.61 740.23L1224.61 466.8Q1224.61 318.36 1125.49 318.36Q1075.68 318.36 1041.5 361.33Q1007.32 404.3 1007.32 471.19L1007.32 740.23L893.55 740.23L893.55 0L1007.32 0L1007.32 323.24L1009.28 323.24Q1065.92 228.52 1171.39 228.52Q1337.89 228.52 1337.89 432.13ZM1895.02 521L1554.2 521Q1556.15 590.33 1596.92 627.93Q1637.7 665.53 1708.98 665.53Q1789.06 665.53 1855.96 617.68L1855.96 708.98Q1787.6 751.95 1675.29 751.95Q1564.94 751.95 1502.2 683.84Q1439.45 615.72 1439.45 492.19Q1439.45 375.49 1508.54 302Q1577.64 228.52 1680.18 228.52Q1782.71 228.52 1838.87 294.43Q1895.02 360.35 1895.02 477.54ZM1785.64 440.92Q1785.16 379.88 1756.84 345.95Q1728.52 312.01 1678.71 312.01Q1629.88 312.01 1595.95 347.66Q1562.01 383.3 1554.2 440.92ZM2112.79 740.23L1999.02 740.23L1999.02 0L2112.79 0ZM2370.12 740.23L2256.35 740.23L2256.35 0L2370.12 0Z"/></g>
+          </svg>
+        </div>
+        <div class="win-controls" aria-hidden="true"><i></i><i></i><i></i></div>
+      </div>
+
+      <!-- 顶栏 -->
+      <div class="top">
+        <div class="search">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          搜索主机 <kbd>Ctrl K</kbd>
+        </div>
+        <div class="spacer"></div>
+        <div class="ico" title="端口转发">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h12m0 0l-3-3m3 3l-3 3M20 17H8m0 0l3-3m-3 3l3 3"/></svg>
+        </div>
+        <div class="ico" title="快捷键">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>
+        </div>
+        <div class="ico" title="主题">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor" stroke="none"/></svg>
+        </div>
+      </div>
+
+      <!-- 主体 -->
+      <div class="main">
+        <!-- 主机库 -->
+        <div class="side" aria-hidden="true">
+          <div class="grp">生产环境</div>
+          <div class="row active"><span class="st on"></span>prod-01</div>
+          <div class="row"><span class="st on"></span>prod-02</div>
+          <div class="row"><span class="st warn"></span>db-01</div>
+          <div class="grp">测试环境</div>
+          <div class="row"><span class="st idle"></span>test-01</div>
+          <div class="row"><span class="st idle"></span>staging</div>
+          <div class="tags"><span class="tag">web</span><span class="tag">api</span><span class="tag">db</span></div>
+        </div>
+
+        <!-- 工作区 -->
+        <div class="work">
+          <div class="tabs" aria-hidden="true">
+            <div class="tab active"><span class="st"></span>prod-01</div>
+            <div class="tab"><span class="st"></span>prod-02</div>
+            <div class="tab"><span class="st"></span>db-01</div>
+          </div>
+          <div class="term-wrap">
+            <div class="term" id="term" aria-hidden="true">
+              <!-- JS 逐行打字；无 JS 时静态内容直接可见 -->
+              <div><span class="p-user">ubuntu</span><span class="p-at">@</span><span class="p-host">prod-01</span><span class="p-at">:~$ </span><span class="cmd typed" data-text="ssh ubuntu@prod-01"></span></div>
+              <div class="out">Welcome to Ubuntu 24.04.1 LTS (GNU/Linux 6.8.0-45-generic x86_64)</div>
+              <div class="out dim">&nbsp;</div>
+              <div><span class="p-user">ubuntu</span><span class="p-at">@</span><span class="p-host">prod-01</span><span class="p-at">:~$ </span><span class="cmd typed" data-text="docker ps --format 'table {{.Names}}\t{{.Status}}'"></span></div>
+              <div class="out">NAMES&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;STATUS&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;IMAGE</div>
+              <div class="out"><span class="ok">web</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Up 12 days (healthy)&nbsp;&nbsp;nginx:1.27</div>
+              <div class="out"><span class="cy">api</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Up 12 days (healthy)&nbsp;&nbsp;api:2.4.1</div>
+              <div class="out"><span class="yl">redis</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Up 12 days&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;redis:7.4</div>
+              <div class="out dim">&nbsp;</div>
+              <div><span class="p-user">ubuntu</span><span class="p-at">@</span><span class="p-host">prod-01</span><span class="p-at">:~$ </span><span class="cmd"></span><span class="cursor"></span></div>
+            </div>
+
+            <!-- SFTP 面板 -->
+            <div class="sftp" aria-hidden="true">
+              <div class="sftp-head">SFTP <span class="follow">跟随终端目录</span></div>
+              <div class="cwd">/home/ubuntu/deploy</div>
+              <div class="frow"><svg viewBox="0 0 24 24" fill="none" stroke="#79B8FF" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>nginx<span class="sz">—</span></div>
+              <div class="frow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>docker-compose.yml<span class="sz">1.2 KB</span></div>
+              <div class="frow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>.env<span class="sz">286 B</span></div>
+              <div class="frow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>backup.sql<span class="sz">4.1 MB</span></div>
+              <div class="frow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>deploy.sh<span class="sz">2.4 KB</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 状态栏 -->
+      <div class="status" aria-hidden="true">
+        <span class="st"></span> prod-01 · 已连接
+        <span class="lat">12 ms</span>
+        <div class="right"><span>AES-256-GCM</span><span>UTF-8</span><span>xterm · WebGL</span></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ===== 特性 ===== -->
+<section class="features">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>小身材，全功能</h2>
+      <p>一台机器该有的，都在这 2.7 MB 里。</p>
+    </div>
+    <div class="feat-grid">
+      <div class="feat">
+        <div class="fi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v5"/></svg></div>
+        <h3>主机库</h3>
+        <p>分组树 · 标签 · 拖拽调宽</p>
+      </div>
+      <div class="feat">
+        <div class="fi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="M7 13l2 2-2 2"/></svg></div>
+        <h3>多标签终端</h3>
+        <p>xterm.js <code>WebGL</code> 渲染，深浅双主题</p>
+      </div>
+      <div class="feat">
+        <div class="fi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3v4M16 3v4M4 9h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg></div>
+        <h3>SFTP 面板</h3>
+        <p>跟随终端目录，一键回位</p>
+      </div>
+      <div class="feat">
+        <div class="fi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h10m0 0l-3-3m3 3l-3 3M20 17H10m0 0l3-3m-3 3l3 3"/></svg></div>
+        <h3>端口转发</h3>
+        <p>图形化配置管理</p>
+      </div>
+      <div class="feat">
+        <div class="fi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.2 7.7-8 9-4.8-1.3-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <h3>凭据加密</h3>
+        <p><code>AES-256-GCM</code> + Windows DPAPI</p>
+      </div>
+      <div class="feat">
+        <div class="fi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l8 3v6c0 4.5-3.2 7.7-8 9-4.8-1.3-8-4.5-8-9V6z"/><path d="M12 8v4m0 4h.01"/></svg></div>
+        <h3>指纹校验</h3>
+        <p>主机密钥变更，硬阻断不静默</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 版本更新 ===== -->
+<section class="changelog" id="changelog">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>版本更新</h2>
+      <p>每个版本的升级内容，一目了然。</p>
+    </div>
+    <div class="log-list">
+      <div class="log-item">
+        <div class="log-head">
+          <span class="log-ver">v1.1.0</span>
+          <span class="log-tag">最新</span>
+          <span class="log-date">2026-11-06</span>
+        </div>
+        <ul>
+          <li><strong>网速监控</strong>：底部状态栏实时显示会话网速（↓ 接收 · ↑ 发送），基于 SSH 终端通道字节计数</li>
+          <li><strong>主机硬件信息</strong>：状态栏展示目标主机 CPU 使用率、内存、磁盘、负载与运行时长，悬停可见主机名、系统与 CPU 型号</li>
+          <li><strong>拖拽排序</strong>：左侧主机可在分组间拖拽移动或组内调序，分组顺序同样支持拖拽，调整持久保存</li>
+          <li><strong>终端缩放</strong>：终端视图支持 <code>Ctrl + 滚轮</code> 缩放字号（8–32px），偏好全局记忆</li>
+        </ul>
+      </div>
+      <div class="log-item">
+        <div class="log-head">
+          <span class="log-ver">v1.0.0</span>
+          <span class="log-date">2026-11-04</span>
+        </div>
+        <ul>
+          <li>首个正式版本：主机库分组管理、多标签终端（xterm.js <code>WebGL</code> 渲染）</li>
+          <li>SFTP 面板：跟随终端目录、上传下载、右键操作</li>
+          <li>端口转发图形化配置，支持自动启动</li>
+          <li>凭据加密存储：<code>AES-256-GCM</code> + Windows DPAPI</li>
+          <li>主机密钥指纹校验，密钥变更硬阻断</li>
+          <li>深浅双主题、快捷键体系、会话自动重连与保活</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 尾部 CTA ===== -->
+<section class="final">
+  <div class="wrap">
+    <h2>下载，双击，连上</h2>
+    <p class="sub">2.7 MB · 无需主密码 · 密钥绑定当前 Windows 账户</p>
+    <div class="hero-ctas">
+      <a class="btn btn-primary" href="downloads/Lshell_1.0.0_x64-setup.exe" download>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
+        下载安装包 <span class="btn-meta">.exe · 2.7 MB</span>
+      </a>
+      <a class="btn btn-ghost" href="downloads/Lshell_1.0.0_x64_en-US.msi" download>
+        MSI 安装包 <span class="btn-meta">4.5 MB · 企业部署</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 页脚 ===== -->
+<footer>
+  <div class="wrap foot-inner">
+    <div class="foot-left">
+      <svg viewBox="0 0 2646.21 751.95" aria-hidden="true">
+        <g fill="#626B7C"><path d="M387.7 740.23L0 740.23L0 40.04L116.21 40.04L116.21 642.09L387.7 642.09Z"/><rect x="2470.21" y="300.23" width="176" height="440" rx="24.64"/></g>
+        <g fill="#98A1B2"><path d="M435.06 724.61L435.06 619.63Q498.54 667.97 575.2 667.97Q677.73 667.97 677.73 607.42Q677.73 590.33 668.95 578.37Q660.16 566.41 645.26 557.13Q630.37 547.85 610.11 540.53Q589.84 533.2 564.94 523.93Q534.18 511.72 509.52 498.05Q484.86 484.38 468.51 467.04Q452.15 449.71 443.85 427.73Q435.55 405.76 435.55 376.46Q435.55 340.33 452.64 312.74Q469.73 285.16 498.54 266.36Q527.34 247.56 563.96 238.04Q600.59 228.52 639.65 228.52Q708.98 228.52 763.67 249.51L763.67 348.63Q710.94 312.5 642.58 312.5Q621.09 312.5 603.76 316.89Q586.43 321.29 574.22 329.1Q562.01 336.91 555.18 347.9Q548.34 358.89 548.34 372.07Q548.34 388.18 555.18 399.41Q562.01 410.64 575.44 419.19Q588.87 427.73 607.67 434.81Q626.46 441.89 650.88 450.2Q683.11 463.38 708.74 477.05Q734.38 490.72 752.44 508.06Q770.51 525.39 780.27 548.1Q790.04 570.8 790.04 602.05Q790.04 640.14 772.46 668.46Q754.88 696.78 725.59 715.33Q696.29 733.89 657.96 742.92Q619.63 751.95 577.15 751.95Q495.12 751.95 435.06 724.61ZM1337.89 740.23L1224.61 740.23L1224.61 466.8Q1224.61 318.36 1125.49 318.36Q1075.68 318.36 1041.5 361.33Q1007.32 404.3 1007.32 471.19L1007.32 740.23L893.55 740.23L893.55 0L1007.32 0L1007.32 323.24L1009.28 323.24Q1065.92 228.52 1171.39 228.52Q1337.89 228.52 1337.89 432.13ZM1895.02 521L1554.2 521Q1556.15 590.33 1596.92 627.93Q1637.7 665.53 1708.98 665.53Q1789.06 665.53 1855.96 617.68L1855.96 708.98Q1787.6 751.95 1675.29 751.95Q1564.94 751.95 1502.2 683.84Q1439.45 615.72 1439.45 492.19Q1439.45 375.49 1508.54 302Q1577.64 228.52 1680.18 228.52Q1782.71 228.52 1838.87 294.43Q1895.02 360.35 1895.02 477.54ZM1785.64 440.92Q1785.16 379.88 1756.84 345.95Q1728.52 312.01 1678.71 312.01Q1629.88 312.01 1595.95 347.66Q1562.01 383.3 1554.2 440.92ZM2112.79 740.23L1999.02 740.23L1999.02 0L2112.79 0ZM2370.12 740.23L2256.35 740.23L2256.35 0L2370.12 0Z"/></g>
+      </svg>
+      <span>© 2026 xichengli · Apache-2.0</span>
+    </div>
+    <div class="foot-links"></div>
+  </div>
+</footer>
+
+<script>
+/* 终端打字动效：JS 不可用时上方静态终端内容直接完整可见（fail open） */
+(function () {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  var terms = document.querySelectorAll('.term .typed');
+  if (!terms.length) return;
+  var outLines = document.querySelectorAll('.term .out');
+  var outIdx = 0;
+
+  outLines.forEach(function (el) { el.style.visibility = 'hidden'; });
+
+  function showOutUntil(target) {
+    while (outIdx < outLines.length && outLines[outIdx] !== target) {
+      outLines[outIdx].style.visibility = '';
+      outIdx++;
+    }
+    if (outIdx < outLines.length) { outLines[outIdx].style.visibility = ''; outIdx++; }
+  }
+
+  function typeCmd(el, speed) {
+    return new Promise(function (resolve) {
+      var text = el.getAttribute('data-text') || '';
+      var i = 0;
+      el.textContent = '';
+      (function tick() {
+        if (i >= text.length) { resolve(); return; }
+        el.textContent = text.slice(0, ++i);
+        setTimeout(tick, speed + Math.random() * 26);
+      })();
+    });
+  }
+
+  function pause(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  (async function run() {
+    var first = terms[0], second = terms[1];
+    await pause(900);
+    await typeCmd(first, 42);
+    await pause(300);
+    /* 第一条命令后面的两条 out（欢迎信息 + 空行） */
+    showOutUntil(second);
+    await pause(650);
+    await typeCmd(second, 24);
+    await pause(350);
+    while (outIdx < outLines.length) { outLines[outIdx].style.visibility = ''; outIdx++; }
+  })();
+})();
+</script>
+</body>
+</html>
