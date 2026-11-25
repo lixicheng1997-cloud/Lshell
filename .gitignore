@@ -20,3 +20,14 @@ Thumbs.db
 # 本地环境
 .env
 .env.local
+
+# AI 工具会话数据
+.workbuddy/
+.screenshots/
+
+# 设计与文档
+design/
+docs/
+
+# 临时文件
+tmp/
